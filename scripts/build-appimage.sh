@@ -25,10 +25,10 @@ echo Cleaning output directories
 rm -rf $BUILD_FOLDER
 rm -rf $DEPLOY_FOLDER
 rm -rf $INSTALLER_FOLDER
-mkdir $BUILD_ROOT
-mkdir $BUILD_FOLDER
-mkdir $DEPLOY_FOLDER
-mkdir $INSTALLER_FOLDER
+mkdir -p $BUILD_ROOT
+mkdir -p $BUILD_FOLDER
+mkdir -p $DEPLOY_FOLDER
+mkdir -p $INSTALLER_FOLDER
 
 echo Configuring the project
 pushd $BUILD_FOLDER
@@ -42,7 +42,7 @@ pushd $BUILD_FOLDER
 qmake6 $SOURCE_ROOT/moonlight-qt.pro CONFIG+=disable-wayland CONFIG+=disable-libdrm PREFIX=$DEPLOY_FOLDER/usr DEFINES+=APP_IMAGE || fail "Qmake failed!"
 popd
 
-echo Compiling Moonlight in $BUILD_CONFIG configuration
+echo Compiling StreamLight in $BUILD_CONFIG configuration
 pushd $BUILD_FOLDER
 make -j$(nproc) $(echo "$BUILD_CONFIG" | tr '[:upper:]' '[:lower:]') || fail "Make failed!"
 popd
@@ -52,17 +52,25 @@ pushd $BUILD_FOLDER
 make install || fail "Make install failed!"
 popd
 
-# We need to manually place SDL3 in our AppImage, since linuxdeployqt
-# cannot see the dependency via ldd when it looks at SDL2-compat.
-echo Staging SDL3 library
-mkdir -p $DEPLOY_FOLDER/usr/lib
-cp /usr/local/lib/libSDL3.so.0 $DEPLOY_FOLDER/usr/lib/
+# If SDL3 exists on the host build system, stage it for SDL2-compat
+EXTRA_EXEC_ARGS=""
+if [ -f /usr/local/lib/libSDL3.so.0 ]; then
+  echo Staging SDL3 library
+  mkdir -p $DEPLOY_FOLDER/usr/lib
+  cp /usr/local/lib/libSDL3.so.0 $DEPLOY_FOLDER/usr/lib/
+  EXTRA_EXEC_ARGS="-executable=$DEPLOY_FOLDER/usr/lib/libSDL3.so.0"
+elif [ -f /usr/lib/libSDL3.so.0 ]; then
+  echo Staging SDL3 library
+  mkdir -p $DEPLOY_FOLDER/usr/lib
+  cp /usr/lib/libSDL3.so.0 $DEPLOY_FOLDER/usr/lib/
+  EXTRA_EXEC_ARGS="-executable=$DEPLOY_FOLDER/usr/lib/libSDL3.so.0"
+fi
 
 echo Creating AppImage
 pushd $INSTALLER_FOLDER
-VERSION=$VERSION linuxdeployqt $DEPLOY_FOLDER/usr/share/applications/com.moonlight_stream.Moonlight.desktop \
+VERSION=$VERSION linuxdeployqt $DEPLOY_FOLDER/usr/share/applications/com.foggybytes.StreamLight.desktop \
   -qmake=qmake6 -qmldir=$SOURCE_ROOT/app/gui -appimage -extra-plugins=tls \
-  -executable=$DEPLOY_FOLDER/usr/lib/libSDL3.so.0 || fail "linuxdeployqt failed!"
+  $EXTRA_EXEC_ARGS || fail "linuxdeployqt failed!"
 popd
 
 echo Build successful
