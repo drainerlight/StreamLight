@@ -30,7 +30,7 @@ jobs:
       - name: Install Qt via aqt
         shell: cmd
         run: |
-          python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 -m qtbase qtdeclarative qtmultimedia qtnetwork qtsvg
+          python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64
 
       - name: Setup Qt environment
         shell: cmd
