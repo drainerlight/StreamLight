@@ -50,8 +50,10 @@ jobs:
       - name: Configure with QMake
         shell: cmd
         working-directory: build\build-release
+        env:
+          QT_BIN: ${{ env.QT_ROOT_DIR }}\bin
         run: |
-          qmake.exe ..\.. PREFIX=%CD% ^
+          "%QT_BIN%\qmake.exe" ..\.. PREFIX=%CD% ^
             CONFIG+=release ^
             DEFINES+=APP_VERSION=\"${{ env.CI_VERSION }}\"
 
