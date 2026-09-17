@@ -30,7 +30,7 @@ jobs:
           target: 'desktop'
           arch: 'win64_msvc2022_64'
           modules: 'qtbase qtdeclarative qtmultimedia qtnetwork qtsvg'
-          cache: 'true'
+          cache: 'false'
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1

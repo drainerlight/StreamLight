@@ -13,8 +13,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: bilelmoussaoui/flatpak-builder:latest
     env:
       FLATPAK_MODULE: com.foggybytes.StreamLight
     steps:
@@ -23,6 +21,14 @@ jobs:
         with:
           submodules: 'recursive'
           fetch-depth: 1
+
+      - name: Install Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      - name: Add Flathub Repository
+        run: sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
       - name: Build Flatpak
         run: |
