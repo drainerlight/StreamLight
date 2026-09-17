@@ -32,7 +32,7 @@ jobs:
 
       - name: Build Flatpak
         run: |
-          flatpak-builder --repo=repo --disable-rofiles-fuse --force-clean build $FLATPAK_MODULE.json
+          flatpak-builder --repo=repo --disable-rofiles-fuse --force-clean -vv build $FLATPAK_MODULE.json
 
       - name: Create Bundle
         run: |
