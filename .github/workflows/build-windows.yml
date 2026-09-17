@@ -1,0 +1,95 @@
+---
+name: Build - Windows .exe
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      ci_version:
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CI_VERSION: ${{ inputs.ci_version }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.8.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          modules: 'qtbase qtdeclarative qtmultimedia qtnetwork qtsvg'
+          cache: 'true'
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Create Build Directory
+        run: mkdir build\build-release
+
+      - name: Configure with QMake
+        shell: cmd
+        working-directory: build\build-release
+        run: |
+          qmake.exe ..\.. PREFIX=%CD% ^
+            CONFIG+=release ^
+            DEFINES+=APP_VERSION=\"${{ env.CI_VERSION }}\"
+
+      - name: Build Release
+        shell: cmd
+        working-directory: build\build-release
+        run: nmake release
+
+      - name: Deploy with windeployqt
+        shell: cmd
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set PATH=%CD%\build\build-release\app\release;%PATH%
+          windeployqt.exe ^
+            --release ^
+            --no-compiler-runtime ^
+            --qmldir app\gui ^
+            build\build-release\app\release\streamlight.exe
+
+      - name: Copy Libraries
+        shell: powershell
+        run: |
+          $BuildDir = "build\build-release\app\release"
+          $LibsDir = "libs\windows\lib\x64"
+          
+          if (Test-Path $LibsDir) {
+            Copy-Item "$LibsDir\*.dll" -Destination $BuildDir -Force
+            Copy-Item "$LibsDir\*.pdb" -Destination $BuildDir -Force
+          }
+
+      - name: Create Release Archive
+        shell: powershell
+        run: |
+          $BuildDir = "build\build-release\app\release"
+          $ArchiveName = "StreamLight-${{ env.CI_VERSION }}-Windows-x64.zip"
+          
+          Compress-Archive -Path $BuildDir -DestinationPath $ArchiveName -Force
+          
+          Get-Item $ArchiveName | Select-Object FullName, @{Name='Size';Expression={'{0:N2} MB' -f ($_.Length/1MB)}}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: StreamLight-Windows-${{ env.CI_VERSION }}
+          path: StreamLight-${{ env.CI_VERSION }}-Windows-x64.zip
+          compression-level: 0
+          if-no-files-found: error

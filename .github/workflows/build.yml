@@ -40,3 +40,9 @@ jobs:
     uses: ./.github/workflows/flatpak.yml
     with:
       ci_version: ${{ needs.setup.outputs.ci_version }}
+
+  build-windows:
+    needs: setup
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      ci_version: ${{ needs.setup.outputs.ci_version }}
