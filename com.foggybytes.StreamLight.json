@@ -182,8 +182,6 @@
         }
       },
       "config-opts": [
-        "CONFIG+=disable-wayland",
-        "CONFIG+=disable-libdrm",
         "PREFIX=/app"
       ],
       "sources": [
