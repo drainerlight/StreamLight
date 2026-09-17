@@ -50,10 +50,8 @@ jobs:
       - name: Configure with QMake
         shell: cmd
         working-directory: build\build-release
-        env:
-          QT_BIN: ${{ env.QT_ROOT_DIR }}\bin
         run: |
-          "%QT_BIN%\qmake.exe" ..\.. PREFIX=%CD% ^
+          "D:\a\StreamLight\StreamLight\6.8.3\msvc2022_64\bin\qmake.exe" ..\.. PREFIX=%CD% ^
             CONFIG+=release ^
             DEFINES+=APP_VERSION=\"${{ env.CI_VERSION }}\"
 
