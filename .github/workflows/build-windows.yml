@@ -63,7 +63,7 @@ jobs:
             --release ^
             --no-compiler-runtime ^
             --qmldir app\gui ^
-            build\build-release\app\release\streamlight.exe
+            build\build-release\app\release\StreamLight.exe
 
       - name: Copy Libraries
         shell: powershell
