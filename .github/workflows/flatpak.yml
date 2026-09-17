@@ -1,0 +1,41 @@
+---
+name: Build - Flatpak
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      ci_version:
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-builder:latest
+    env:
+      FLATPAK_MODULE: com.foggybytes.StreamLight
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Build Flatpak
+        run: |
+          flatpak-builder --repo=repo --disable-rofiles-fuse --force-clean build $FLATPAK_MODULE.json
+
+      - name: Create Bundle
+        run: |
+          flatpak build-bundle repo $FLATPAK_MODULE-${{ inputs.ci_version }}.flatpak $FLATPAK_MODULE
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: StreamLight-Flatpak-${{ inputs.ci_version }}
+          path: ${{ env.FLATPAK_MODULE }}-${{ inputs.ci_version }}.flatpak
+          compression-level: 0
+          if-no-files-found: error
