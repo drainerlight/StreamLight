@@ -1,7 +1,7 @@
 {
   "app-id": "com.foggybytes.StreamLight",
   "runtime": "org.kde.Platform",
-  "runtime-version": "6.7",
+  "runtime-version": "6.8",
   "sdk": "org.kde.Sdk",
   "sdk-extensions": ["org.kde.Sdk.Compat.x86_64"],
   "command": "streamlight",
@@ -44,7 +44,7 @@
         {
           "type": "git",
           "url": "https://gitlab.freedesktop.org/vdpau/libvdpau.git",
-          "commit": "9aae72b8104d888bfed6a22e01849521e0c16797"
+          "tag": "1.5.1"
         }
       ]
     },
@@ -190,7 +190,7 @@
         {
           "type": "git",
           "url": "https://github.com/FoggyBytes/StreamLight.git",
-          "tag": "v5.10.0-test2"
+          "tag": "v5.9.0"
         }
       ]
     }
