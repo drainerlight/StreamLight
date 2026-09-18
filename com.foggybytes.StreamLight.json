@@ -3,7 +3,6 @@
   "runtime": "org.kde.Platform",
   "runtime-version": "6.7",
   "sdk": "org.kde.Sdk",
-  "sdk-extensions": ["org.kde.Sdk.Compat.x86_64"],
   "command": "streamlight",
   "finish-args": [
     "--share=ipc",
