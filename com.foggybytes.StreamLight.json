@@ -44,7 +44,7 @@
         {
           "type": "git",
           "url": "https://gitlab.freedesktop.org/vdpau/libvdpau.git",
-          "commit": "9aae72b8104d888bfed6a22e01849521e0c16797"
+          "branch": "master"
         }
       ]
     },
