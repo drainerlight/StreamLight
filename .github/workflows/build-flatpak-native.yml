@@ -30,7 +30,7 @@ jobs:
 
       - name: Add Flathub Remote
         run: |
-          flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
       - name: Install KDE Runtimes
         run: |
@@ -40,11 +40,12 @@ jobs:
       - name: Build Flatpak Bundle
         run: |
           mkdir -p build/flatpak-{build,repo}
-          flatpak-builder --repo=build/flatpak-repo --force-clean build/flatpak-build com.foggybytes.StreamLight.json
+          sudo flatpak-builder --repo=build/flatpak-repo --force-clean build/flatpak-build com.foggybytes.StreamLight.json
 
       - name: Create Flatpak Bundle
         run: |
           sudo flatpak build-bundle build/flatpak-repo "${FLATPAK_ID}-${CI_VERSION}.flatpak" "${FLATPAK_ID}"
+          sudo chown runner:runner "${FLATPAK_ID}-${CI_VERSION}.flatpak"
           ls -lh "${FLATPAK_ID}-${CI_VERSION}.flatpak"
 
       - name: Upload Artifact
