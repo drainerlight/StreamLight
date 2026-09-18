@@ -1,7 +1,7 @@
 {
   "app-id": "com.foggybytes.StreamLight",
   "runtime": "org.kde.Platform",
-  "runtime-version": "6.7",
+  "runtime-version": "6.8",
   "sdk": "org.kde.Sdk",
   "sdk-extensions": ["org.kde.Sdk.Compat.x86_64"],
   "command": "streamlight",
@@ -182,13 +182,15 @@
         }
       },
       "config-opts": [
+        "CONFIG+=disable-wayland",
+        "CONFIG+=disable-libdrm",
         "PREFIX=/app"
       ],
       "sources": [
         {
           "type": "git",
           "url": "https://github.com/FoggyBytes/StreamLight.git",
-          "tag": "v5.9.0"
+          "tag": "v5.10.0-test2"
         }
       ]
     }
