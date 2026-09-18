@@ -27,11 +27,12 @@ jobs:
     with:
       ci_version: ${{ needs.setup.outputs.ci_version }}
 
-  build-flatpak:
-    needs: setup
-    uses: ./.github/workflows/build-flatpak-native.yml
-    with:
-      ci_version: ${{ needs.setup.outputs.ci_version }}
+  # Flatpak temporarily disabled - libvdpau tag resolution issues
+  # build-flatpak:
+  #   needs: setup
+  #   uses: ./.github/workflows/build-flatpak-native.yml
+  #   with:
+  #     ci_version: ${{ needs.setup.outputs.ci_version }}
 
   build-windows:
     needs: setup
@@ -40,7 +41,7 @@ jobs:
       ci_version: ${{ needs.setup.outputs.ci_version }}
 
   create-release:
-    needs: [setup, build-appimage, build-flatpak, build-windows]
+    needs: [setup, build-appimage, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Download AppImage Artifact
@@ -49,11 +50,11 @@ jobs:
           name: StreamLight-LinuxAppImage-${{ needs.setup.outputs.ci_version }}
           path: ./artifacts/
 
-      - name: Download Flatpak Artifact
-        uses: actions/download-artifact@v6
-        with:
-          name: StreamLight-Flatpak-${{ needs.setup.outputs.ci_version }}
-          path: ./artifacts/
+      # - name: Download Flatpak Artifact
+      #   uses: actions/download-artifact@v6
+      #   with:
+      #     name: StreamLight-Flatpak-${{ needs.setup.outputs.ci_version }}
+      #     path: ./artifacts/
 
       - name: Download Windows Artifact
         uses: actions/download-artifact@v6
@@ -68,5 +69,4 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/StreamLight-${{ needs.setup.outputs.ci_version }}-x86_64.AppImage
-            artifacts/com.foggybytes.StreamLight-${{ needs.setup.outputs.ci_version }}.flatpak
             artifacts/StreamLight-${{ needs.setup.outputs.ci_version }}-Windows-x64.zip
