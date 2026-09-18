@@ -1,0 +1,56 @@
+---
+name: Build - Flatpak (Native)
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      ci_version:
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      FLATPAK_ID: com.foggybytes.StreamLight
+      CI_VERSION: ${{ inputs.ci_version }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Install Flatpak and Builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      - name: Add Flathub Remote
+        run: |
+          flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install KDE Runtimes
+        run: |
+          sudo flatpak install -y --noninteractive flathub org.kde.Platform//6.7 org.kde.Sdk//6.7 || \
+            { echo "⚠️  Some runtimes failed to install (optional components)"; true; }
+
+      - name: Build Flatpak Bundle
+        run: |
+          mkdir -p build/flatpak-{build,repo}
+          flatpak-builder --repo=build/flatpak-repo --force-clean build/flatpak-build com.foggybytes.StreamLight.json
+
+      - name: Create Flatpak Bundle
+        run: |
+          sudo flatpak build-bundle build/flatpak-repo "${FLATPAK_ID}-${CI_VERSION}.flatpak" "${FLATPAK_ID}"
+          ls -lh "${FLATPAK_ID}-${CI_VERSION}.flatpak"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: StreamLight-Flatpak-${{ env.CI_VERSION }}
+          path: ${{ env.FLATPAK_ID }}-${{ env.CI_VERSION }}.flatpak
+          compression-level: 0
+          if-no-files-found: error

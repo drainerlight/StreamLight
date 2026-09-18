@@ -29,7 +29,7 @@ jobs:
 
   build-flatpak:
     needs: setup
-    uses: ./.github/workflows/flatpak.yml
+    uses: ./.github/workflows/build-flatpak-native.yml
     with:
       ci_version: ${{ needs.setup.outputs.ci_version }}
 
