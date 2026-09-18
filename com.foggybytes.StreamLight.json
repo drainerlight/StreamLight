@@ -40,11 +40,13 @@
     },
     {
       "name": "libvdpau",
+      "skip-arches": ["aarch64"],
       "sources": [
         {
           "type": "git",
           "url": "https://gitlab.freedesktop.org/vdpau/libvdpau.git",
-          "branch": "master"
+          "tag": "1.5",
+          "disable-shallow-clone": true
         }
       ]
     },
@@ -182,15 +184,13 @@
         }
       },
       "config-opts": [
-        "CONFIG+=disable-wayland",
-        "CONFIG+=disable-libdrm",
         "PREFIX=/app"
       ],
       "sources": [
         {
           "type": "git",
-          "url": "https://github.com/FoggyBytes/StreamLight.git",
-          "tag": "v5.10.0-test2"
+          "url": "https://github.com/drainerlight/StreamLight.git",
+          "tag": "v5.11.0"
         }
       ]
     }
