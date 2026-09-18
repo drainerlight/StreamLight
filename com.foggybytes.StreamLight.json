@@ -38,18 +38,6 @@
       ]
     },
     {
-      "name": "libvdpau",
-      "skip-arches": ["aarch64"],
-      "sources": [
-        {
-          "type": "git",
-          "url": "https://gitlab.freedesktop.org/vdpau/libvdpau.git",
-          "tag": "1.5",
-          "disable-shallow-clone": true
-        }
-      ]
-    },
-    {
       "name": "libplacebo",
       "buildsystem": "meson",
       "config-opts": [
