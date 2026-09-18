@@ -23,11 +23,11 @@ jobs:
           fetch-depth: 1
 
       - name: Build Flatpak
-        uses: flathub-infra/flatpak-github-actions@v1
+        uses: bilelmoussaoui/flatpak-github-actions@main
         with:
           bundle: ${{ env.FLATPAK_ID }}
           manifest-path: com.foggybytes.StreamLight.json
-          cache-build-dir: false
+          arch: x86_64
 
       - name: Rename and Upload Artifact
         uses: actions/upload-artifact@v6
