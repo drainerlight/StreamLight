@@ -66,7 +66,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           set PATH=%CD%\build\build-release\app\release;%PATH%
-          windeployqt.exe ^
+          "D:\a\StreamLight\StreamLight\6.8.3\msvc2022_64\bin\windeployqt.exe" ^
             --release ^
             --no-compiler-runtime ^
             --qmldir app\gui ^
