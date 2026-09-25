@@ -1,0 +1,185 @@
+{
+  "app-id": "com.foggybytes.StreamLight",
+  "runtime": "org.kde.Platform",
+  "runtime-version": "6.7",
+  "sdk": "org.kde.Sdk",
+  "command": "streamlight",
+  "finish-args": [
+    "--share=ipc",
+    "--share=network",
+    "--socket=wayland",
+    "--socket=x11",
+    "--socket=pulseaudio",
+    "--device=dri",
+    "--filesystem=home",
+    "--env=SDL_VIDEODRIVER=wayland,x11"
+  ],
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/man",
+    "/share/doc",
+    "/share/man",
+    "*.la",
+    "*.a"
+  ],
+  "modules": [
+    {
+      "name": "libva",
+      "config-opts": [
+        "--enable-x11"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/intel/libva.git",
+          "tag": "2.23.0"
+        }
+      ]
+    },
+    {
+      "name": "libplacebo",
+      "buildsystem": "meson",
+      "config-opts": [
+        "-Dvulkan=enabled",
+        "-Dopengl=disabled",
+        "-Ddemos=false"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/haasn/libplacebo.git",
+          "tag": "v7.360.1",
+          "submodules": true
+        }
+      ]
+    },
+    {
+      "name": "dav1d",
+      "buildsystem": "meson",
+      "config-opts": [
+        "-Ddefault_library=static",
+        "-Dbuildtype=release",
+        "-Denable_tools=false",
+        "-Denable_tests=false"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://code.videolan.org/videolan/dav1d.git",
+          "tag": "1.5.3"
+        }
+      ]
+    },
+    {
+      "name": "ffmpeg",
+      "config-opts": [
+        "--enable-pic",
+        "--disable-static",
+        "--enable-shared",
+        "--disable-all",
+        "--disable-autodetect",
+        "--enable-avcodec",
+        "--enable-avformat",
+        "--enable-swscale",
+        "--enable-decoder=h264",
+        "--enable-decoder=hevc",
+        "--enable-decoder=av1",
+        "--enable-vaapi",
+        "--enable-hwaccel=h264_vaapi",
+        "--enable-hwaccel=hevc_vaapi",
+        "--enable-hwaccel=av1_vaapi",
+        "--enable-vdpau",
+        "--enable-hwaccel=h264_vdpau",
+        "--enable-hwaccel=hevc_vdpau",
+        "--enable-hwaccel=av1_vdpau",
+        "--enable-libdrm",
+        "--enable-vulkan",
+        "--enable-hwaccel=h264_vulkan",
+        "--enable-hwaccel=hevc_vulkan",
+        "--enable-hwaccel=av1_vulkan",
+        "--enable-libdav1d",
+        "--enable-decoder=libdav1d"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/FFmpeg/FFmpeg.git",
+          "tag": "n8.1.1"
+        }
+      ]
+    },
+    {
+      "name": "sdl3",
+      "buildsystem": "cmake",
+      "config-opts": [
+        "-DSDL_KMSDRM=OFF",
+        "-DSDL_TEST_LIBRARY=OFF",
+        "-DSDL_INSTALL_DOCS=OFF"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/libsdl-org/SDL.git",
+          "tag": "release-3.4.8"
+        }
+      ]
+    },
+    {
+      "name": "sdl2-compat",
+      "buildsystem": "cmake",
+      "config-opts": [
+        "-DSDL2COMPAT_TESTS=OFF"
+      ],
+      "post-install": [
+        "ln -sf /app/lib/pkgconfig/sdl2-compat.pc /app/lib/pkgconfig/sdl2.pc"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/libsdl-org/sdl2-compat.git",
+          "tag": "release-2.32.68"
+        }
+      ]
+    },
+    {
+      "name": "sdl_ttf",
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/libsdl-org/SDL_ttf.git",
+          "commit": "a883e490e30fb44a5336ea3dcb990c6982c5216f"
+        }
+      ]
+    },
+    {
+      "name": "opus",
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/xiph/opus.git",
+          "tag": "v1.5.2"
+        }
+      ]
+    },
+    {
+      "name": "streamlight",
+      "buildsystem": "qmake",
+      "build-options": {
+        "env": {
+          "LD_LIBRARY_PATH": "/app/lib"
+        }
+      },
+      "config-opts": [
+        "PREFIX=/app"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/drainerlight/StreamLight.git",
+          "tag": "v5.11.0"
+        }
+      ]
+    }
+  ]
+}

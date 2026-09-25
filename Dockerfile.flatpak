@@ -1,0 +1,29 @@
+FROM fedora:40
+
+# Install dependencies
+RUN dnf install -y \
+    flatpak \
+    flatpak-builder \
+    git \
+    && dnf clean all
+
+# Add Flathub remote
+RUN flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+# Pre-install runtimes (with timeout to fail fast if network issue)
+RUN timeout 600 flatpak install -y --noninteractive flathub org.kde.Platform//6.7 org.kde.Sdk//6.7 org.kde.Sdk.Compat.x86_64//6.7 || \
+    { echo "⚠️  Failed to install KDE runtimes - network issue"; exit 1; }
+
+WORKDIR /build
+COPY . .
+
+# Build Flatpak - fail fast if any step fails
+RUN flatpak-builder --repo=repo --force-clean /tmp/flatpak-build com.foggybytes.StreamLight.json || \
+    { echo "❌ Flatpak build failed"; exit 1; }
+
+# Create bundle
+RUN flatpak build-bundle /tmp/flatpak-build com.foggybytes.StreamLight.flatpak com.foggybytes.StreamLight && \
+    ls -lh com.foggybytes.StreamLight.flatpak || \
+    { echo "❌ Bundle creation failed"; exit 1; }
+
+CMD ["bash"]
