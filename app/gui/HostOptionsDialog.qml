@@ -1,6 +1,7 @@
 import Theme 1.0
 import QtQuick 2.15
 import QtQuick.Controls 2.5
+import SdlGamepadKeyNavigation 1.0
 
 // Host "Options" chooser — a wide, centered modal popup showing the host actions as a
 // grid of tiles (emoji + short label) instead of the old dropdown list. Fully pad- and
@@ -24,7 +25,7 @@ Popup {
     readonly property int _rows:  Math.max(1, Math.ceil(_count / _cols))
 
     modal: true
-    Overlay.modal: Rectangle { color: "#cc000000" }
+    Overlay.modal: Rectangle { color: Theme.scrim }
     focus: true
     anchors.centerIn: Overlay.overlay
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -170,7 +171,9 @@ Popup {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: _disabled ? Qt.ArrowCursor : Qt.PointingHandCursor
-                        onEntered: grid.currentIndex = index
+                        // Hover selects only with the mouse in hand, as on the host page: a
+                        // pointer parked over the grid must not move the pad's tile (#24).
+                        onEntered: if (SdlGamepadKeyNavigation.inputMode !== "key") grid.currentIndex = index
                         onClicked: if (!_disabled) dlg.chosen(modelData.kind)
                     }
                 }
