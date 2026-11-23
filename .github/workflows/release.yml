@@ -27,14 +27,6 @@ jobs:
     with:
       ci_version: ${{ needs.setup.outputs.ci_version }}
 
-  # Flatpak disabled in CI/CD - use local build (scripts/build-flatpak-local.sh)
-  # Too many dependency resolution issues in GitHub Actions
-  # build-flatpak:
-  #   needs: setup
-  #   uses: ./.github/workflows/build-flatpak-native.yml
-  #   with:
-  #     ci_version: ${{ needs.setup.outputs.ci_version }}
-
   build-windows:
     needs: setup
     uses: ./.github/workflows/build-windows-release.yml
@@ -50,12 +42,6 @@ jobs:
         with:
           name: StreamLight-LinuxAppImage-${{ needs.setup.outputs.ci_version }}
           path: ./artifacts/
-
-      # - name: Download Flatpak Artifact
-      #   uses: actions/download-artifact@v6
-      #   with:
-      #     name: StreamLight-Flatpak-${{ needs.setup.outputs.ci_version }}
-      #     path: ./artifacts/
 
       - name: Download Windows Artifact
         uses: actions/download-artifact@v6
