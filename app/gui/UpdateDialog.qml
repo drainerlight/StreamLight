@@ -13,6 +13,10 @@ import QtQuick.Layouts 1.3
 Popup {
     id: pop
 
+    // 7.0.0: the shared spring in and quick out (PopEnter/PopExit), off with Reduce animations.
+    enter: PopEnter {}
+    exit: PopExit {}
+
     // Shared dialog measurements — see Theme.uiScale.
     readonly property real _u: Theme.uiScale
     function _px(n) { return Math.round(n * _u) }
@@ -71,6 +75,8 @@ Popup {
 
         // Eyebrow
         Label {
+            // Plain text: a name from the host, never markup (8.5.0, security review).
+            textFormat: Text.PlainText
             text: qsTr("WINDOWS UPDATE") + (pop.hostName.length ? "  ·  " + pop.hostName : "")
             font.family: Theme.family; font.pixelSize: pop._px(Theme.fontSmall); font.bold: true; font.letterSpacing: 1.6
             color: Theme.text3
@@ -157,6 +163,8 @@ Popup {
                                     spacing: pop._px(2)
                                     // Full title — wraps instead of truncating.
                                     Label {
+                                        // Plain text: a name from the host, never markup (8.5.0, security review).
+                                        textFormat: Text.PlainText
                                         text: modelData.title
                                         font.family: Theme.family; font.pixelSize: pop._px(Theme.fontSmall)
                                         color: modelData.category === "upgrade" ? Qt.lighter(Theme.warning, 1.35) : Theme.text
@@ -239,12 +247,18 @@ Popup {
             visible: pop._terminal
             Layout.fillWidth: true
             spacing: pop._px(8)
+            // A finished job draws its check (7.0.0) instead of printing one.
+            SuccessTick {
+                Layout.alignment: Qt.AlignHCenter
+                size: pop._px(30)
+                visible: pop._terminal && pop.phase !== "ERROR"
+                onVisibleChanged: if (visible) play()
+            }
             Label {
-                text: pop.phase === "DONE" ? "✓ " + pop.message
-                    : pop.phase === "NO_UPDATES" ? "✓ " + pop.message
+                text: (pop.phase === "DONE" || pop.phase === "NO_UPDATES") ? pop.message
                     : "⚠ " + pop.message
                 font.family: Theme.family; font.pixelSize: pop._px(Theme.fontBody)
-                color: pop.phase === "ERROR" ? Theme.danger : Theme.accent
+                color: pop.phase === "ERROR" ? Theme.danger : Theme.inkText
                 Layout.alignment: Qt.AlignHCenter
                 horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap; Layout.fillWidth: true
             }

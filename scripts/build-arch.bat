@@ -200,6 +200,18 @@ echo Copying AntiHooking.dll
 copy %BUILD_FOLDER%\AntiHooking\%BUILD_CONFIG%\AntiHooking.dll %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
 
+rem StreamLight 8.4.0: the service that keeps an LG TV in step with this PC (service\service.pro).
+rem It needs only Qt6Core.dll, which windeployqt puts here for StreamLight.exe anyway.
+echo Copying StreamLightService.exe
+copy %BUILD_FOLDER%\service\%BUILD_CONFIG%\StreamLightService.exe %DEPLOY_FOLDER%
+if !ERRORLEVEL! NEQ 0 goto Error
+
+rem StreamLight 8.6.0: the updater that installs an update without the Windows prompt
+rem (updater\updater.pro). It too needs only Qt6Core.dll.
+echo Copying StreamLightUpdater.exe
+copy %BUILD_FOLDER%\updater\%BUILD_CONFIG%\StreamLightUpdater.exe %DEPLOY_FOLDER%
+if !ERRORLEVEL! NEQ 0 goto Error
+
 echo Copying GC mapping list
 copy %SOURCE_ROOT%\app\SDL_GameControllerDB\gamecontrollerdb.txt %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
@@ -216,6 +228,10 @@ if not x%QT_PATH:\5.=%==x%QT_PATH% (
     set WINDEPLOYQT_ARGS=--no-system-d3d-compiler --no-system-dxc-compiler --skip-plugin-types qmltooling,generic --no-ffmpeg
     set WINDEPLOYQT_ARGS=!WINDEPLOYQT_ARGS! --no-quickcontrols2fusion --no-quickcontrols2imagine --no-quickcontrols2universal
     set WINDEPLOYQT_ARGS=!WINDEPLOYQT_ARGS! --no-quickcontrols2fusionstyleimpl --no-quickcontrols2imaginestyleimpl --no-quickcontrols2universalstyleimpl --no-quickcontrols2windowsstyleimpl --no-quickcontrols2fluentwinui3styleimpl
+    rem Qt 6.12 also deploys the Windows, FluentWinUI3 and Native style libraries (5.5 MB).
+    rem main.cpp forces Material, Controls imports those two styles only as optional, and
+    rem no deployed binary imports any of the three except each other.
+    set WINDEPLOYQT_ARGS=!WINDEPLOYQT_ARGS! --no-quickcontrols2windows --no-quickcontrols2fluentwinui3 --no-quicknativestyle
     rem StreamLight is English-only: app.pro declares no TRANSLATIONS and the app never
     rem installs a QTranslator, so Qt's own .qm catalogues are loaded by nothing. Without
     rem this, windeployqt deploys 31 of them - 6.4 MB, every byte of it dead weight in the
@@ -241,6 +257,20 @@ rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\FluentWinUI3
 rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\NativeStyle
 rem icuuc.dll ships with all supported OSes (and Qt incorrectly deploys the x64 version on ARM64)
 del %DEPLOY_FOLDER%\icuuc.dll
+
+rem StreamLight ships through StreamLight.iss, never through the MSI or the portable zip below.
+rem With STREAMLIGHT_DEPLOY_ONLY set (the GitHub Actions build does), the script stops here
+rem with the deploy folder complete: the exe is copied in and nothing after this point runs -
+rem not the WiX step, which fails on Moonlight's own Product.wxs, and not the portable package,
+rem which would add the VC runtime DLLs and portable.dat to the folder the installer sweeps.
+rem Unset, the script runs on exactly as before.
+if defined STREAMLIGHT_DEPLOY_ONLY (
+    echo Copying application binary to deployment directory
+    copy %BUILD_FOLDER%\app\%BUILD_CONFIG%\StreamLight.exe %DEPLOY_FOLDER%
+    if !ERRORLEVEL! NEQ 0 goto Error
+    echo Deploy folder ready for StreamLight v%VERSION% %ARCH%
+    exit /b 0
+)
 
 if "%SIGN%"=="1" (
     echo Signing deployed binaries

@@ -1,6 +1,5 @@
 #include "computermanager.h"
 #include "boxartmanager.h"
-#include "coverpalette.h"
 #include "nvhttp.h"
 #include "nvpairingmanager.h"
 #include "../settings/appsettings.h"
@@ -856,9 +855,12 @@ private:
                 m_Computer->pendingQuit = false;
             }
             if (e.getStatusCode() == 599) {
-                // 599 is a special code we make a custom message for
-                emit quitAppFailed(tr("The running game wasn't started by this PC. "
-                                      "You must quit the game on the host PC manually or use the device that originally started the game."));
+                // 599 is quitApp() finding the game still running after the host accepted the
+                // quit. Upstream's text blamed another device for starting it; on 16/10/2026 it
+                // was this PC's own Xbox app game, which the host cannot close (see session.cpp,
+                // the same case at the end of a stream), so the message says only what is known.
+                emit quitAppFailed(tr("The host couldn't close the game, and it is still running. "
+                                      "Quit it on the host PC."));
             }
             else {
                 emit quitAppFailed(e.toQString());
@@ -1288,7 +1290,7 @@ bool ComputerManager::setTailscaleAddress(QString uuid, QString tailscaleIp)
     return changed;
 }
 
-bool ComputerManager::setStageBackground(QString uuid, QString imagePath, QString seedColor)
+bool ComputerManager::setStageBackground(QString uuid, QString imagePath, bool lightTheme)
 {
     if (uuid.isEmpty()) {
         return false;
@@ -1303,27 +1305,15 @@ bool ComputerManager::setStageBackground(QString uuid, QString imagePath, QStrin
         return false;
     }
 
-    // Derive here, once, rather than on every repaint: the picture may be a multi-megabyte
-    // JPEG and the stage is drawn every time the user changes host. Storing the result also
-    // means the gradient survives the picture being moved or deleted afterwards.
-    QColor from, to;
-    bool haveColours = false;
-    if (!imagePath.isEmpty()) {
-        haveColours = CoverPalette::fromImageFile(imagePath, from, to);
-    }
-    else if (!seedColor.isEmpty()) {
-        haveColours = CoverPalette::fromSeed(QColor(seedColor), from, to);
-    }
-
     {
         QWriteLocker cLock(&computer->lock);
-        computer->stageImagePath = imagePath;
-        computer->stageSeedColor = seedColor;
-        // A source that yielded nothing usable (a grey picture, an unreadable file) clears
-        // the pair instead of storing the neutral fallback, so the Home screen goes back to
-        // the host's own colours rather than showing every such host the same slate blue.
-        computer->stageColorFrom = haveColours ? from.name() : QString();
-        computer->stageColorTo   = haveColours ? to.name()   : QString();
+        if (lightTheme) {
+            computer->stageImagePathLight = imagePath;
+            computer->stageImageLightSet = true;
+        }
+        else {
+            computer->stageImagePath = imagePath;
+        }
     }
 
     saveHost(computer);
@@ -1349,6 +1339,31 @@ bool ComputerManager::setStageOpacity(QString uuid, int percent)
     {
         QWriteLocker cLock(&computer->lock);
         computer->stageOpacity = percent;
+    }
+
+    saveHost(computer);
+    emit computerStateChanged(computer);
+    return true;
+}
+
+bool ComputerManager::setWakeMacAddress(QString uuid, QByteArray mac)
+{
+    if (uuid.isEmpty() || (!mac.isEmpty() && mac.size() != 6)) {
+        return false;
+    }
+
+    NvComputer* computer = nullptr;
+    {
+        QReadLocker lock(&m_Lock);
+        computer = m_KnownHosts.value(uuid);
+    }
+    if (computer == nullptr) {
+        return false;
+    }
+
+    {
+        QWriteLocker cLock(&computer->lock);
+        computer->wakeMacAddress = mac;
     }
 
     saveHost(computer);

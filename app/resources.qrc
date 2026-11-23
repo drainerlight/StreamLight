@@ -1,18 +1,41 @@
 <RCC>
     <qresource prefix="/">
         <file>res/no_app_image.png</file>
+        <file alias="changelog.txt">../changelog.txt</file>
+        <file alias="sounds/move.wav">res/sounds/move.wav</file>
+        <file alias="sounds/confirm.wav">res/sounds/confirm.wav</file>
+        <file alias="sounds/back.wav">res/sounds/back.wav</file>
+        <file alias="steam/capsule.png">res/steam/streamlight_capsule_600x900.png</file>
+        <file alias="steam/header.png">res/steam/streamlight_header_920x430.png</file>
+        <file alias="steam/hero.png">res/steam/streamlight_hero_3840x1240.png</file>
+        <file alias="steam/logo.png">res/steam/streamlight_logo.png</file>
         <file>res/tailscale.svg</file>
+        <file>res/tailscale_dark.svg</file>
+        <file>res/net.svg</file>
+        <file>res/net_dark.svg</file>
+        <file>res/headphones.svg</file>
+        <file>res/headphones_dark.svg</file>
+        <file>res/nvidia_eye.svg</file>
+        <file>res/nvidia_eye_dark.svg</file>
         <file>res/tune.svg</file>
+        <file>res/tune_dark.svg</file>
         <file>streamlight.ico</file>
         <file>streamlightxbox.png</file>
         <file>res/streamtweak_logo.png</file>
         <file>res/store_steam.svg</file>
+        <file>res/store_steam_dark.svg</file>
         <file>res/store_epic.svg</file>
+        <file>res/store_epic_dark.svg</file>
         <file>res/store_gog.svg</file>
+        <file>res/store_gog_dark.svg</file>
         <file>res/store_ubisoft.svg</file>
+        <file>res/store_ubisoft_dark.svg</file>
         <file>res/store_xbox.svg</file>
+        <file>res/store_xbox_dark.svg</file>
         <file>res/store_battlenet.svg</file>
+        <file>res/store_battlenet_dark.svg</file>
         <file>res/store_ea.svg</file>
+        <file>res/store_ea_dark.svg</file>
         <file>res/pad_xbox_a.svg</file>
         <file>res/pad_xbox_b.svg</file>
         <file>res/pad_xbox_x.svg</file>
@@ -40,13 +63,49 @@
         <file>res/pad_switch_minus.svg</file>
         <file>res/pad_xbox_start.svg</file>
         <file>res/pin.svg</file>
+        <file>res/pin_dark.svg</file>
+        <file>res/search.svg</file>
+        <file>res/search_dark.svg</file>
         <file>res/pad_xbox_view.svg</file>
         <file>res/pad_ps_options.svg</file>
         <file>res/pad_ps_create.svg</file>
         <file>res/pad_switch_plus.svg</file>
+        <file>res/pad_switch_plus_dark.svg</file>
         <file>res/pad_xbox_rs.svg</file>
+        <file>res/pad_xbox_rs_scroll.svg</file>
+        <file>res/pad_ps_r_scroll.svg</file>
+        <file>res/pad_switch_rs_scroll.svg</file>
+        <file>res/pad_steam_rs_scroll.svg</file>
+        <file>res/pad_xbox_rs_scroll_h.svg</file>
+        <file>res/pad_ps_r_scroll_h.svg</file>
+        <file>res/pad_switch_rs_scroll_h.svg</file>
+        <file>res/pad_steam_rs_scroll_h.svg</file>
+        <file>res/pad_xbox_rs_move.svg</file>
+        <file>res/pad_ps_r_move.svg</file>
+        <file>res/pad_switch_rs_move.svg</file>
+        <file>res/pad_steam_rs_move.svg</file>
+        <file>res/pad_dpad_h.svg</file>
         <file>res/pad_ps_r3.svg</file>
         <file>res/pad_switch_rs.svg</file>
+        <file>res/pad_steam_a.svg</file>
+        <file>res/pad_steam_b.svg</file>
+        <file>res/pad_steam_x.svg</file>
+        <file>res/pad_steam_y.svg</file>
+        <file>res/pad_steam_l1.svg</file>
+        <file>res/pad_steam_r1.svg</file>
+        <file>res/pad_steam_l2.svg</file>
+        <file>res/pad_steam_r2.svg</file>
+        <file>res/pad_steam_view.svg</file>
+        <file>res/pad_steam_menu.svg</file>
+        <file>res/pad_steam_r3.svg</file>
+        <file>res/notice_pad.svg</file>
+        <file>res/pad_logo_ps.svg</file>
+        <file>res/pad_logo_switch.svg</file>
+        <file>res/pad_logo_generic.svg</file>
+        <file>res/pad_xbox_ls.svg</file>
+        <file>res/pad_ps_l3.svg</file>
+        <file>res/pad_switch_ls.svg</file>
+        <file>res/pad_steam_l3.svg</file>
         <file>res/fonts/DMSans-Regular.ttf</file>
         <file>res/fonts/DMSans-Medium.ttf</file>
         <file>res/fonts/DMSans-SemiBold.ttf</file>
@@ -55,13 +114,13 @@
     </qresource>
     <qresource prefix="/data">
         <file alias="gamecontrollerdb.txt">SDL_GameControllerDB/gamecontrollerdb.txt</file>
-        <file alias="RobotoMono.ttf">RobotoMono.ttf</file>
         <file alias="egl_nv12.frag">shaders/egl_nv12.frag</file>
         <file alias="egl_opaque.frag">shaders/egl_opaque.frag</file>
         <file alias="egl_overlay.frag">shaders/egl_overlay.frag</file>
         <file alias="egl.vert">shaders/egl.vert</file>
         <file alias="d3d11_vertex.fxc">shaders/d3d11_vertex.fxc</file>
         <file alias="d3d11_overlay_pixel.fxc">shaders/d3d11_overlay_pixel.fxc</file>
+        <file alias="d3d11_overlay_pixel_hdr.fxc">shaders/d3d11_overlay_pixel_hdr.fxc</file>
         <file alias="d3d11_yuv420_pixel.fxc">shaders/d3d11_yuv420_pixel.fxc</file>
         <file alias="d3d11_ayuv_pixel.fxc">shaders/d3d11_ayuv_pixel.fxc</file>
         <file alias="d3d11_y410_pixel.fxc">shaders/d3d11_y410_pixel.fxc</file>

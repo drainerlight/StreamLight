@@ -11,6 +11,7 @@ import StreamingPreferences 1.0
 import SdlGamepadKeyNavigation 1.0
 import SystemProperties 1.0
 import AppUpdate 1.0
+import PyroWaveTest 1.0
 
 /*
  * Home — the stage.
@@ -153,8 +154,8 @@ FocusScope {
     }
 
     // ⚠️ No profile-count test here on purpose, and it is not an omission. This used to
-    // read `focusedProfileCount > 1`, which made the shoulders dead on a host with exactly
-    // one profile — the commonest setup — while HostStage still drew the LB/RB hints,
+    // read `focusedProfileCount > 1`, which made the keys dead on a host with exactly
+    // one profile — the commonest setup — while HostStage still drew the hints (LT/RT since 13/10/2026),
     // because it asks the right question (>= 1). The cycle's stops are Global plus every
     // profile, so ONE profile is already two stops.
     //
@@ -166,6 +167,22 @@ FocusScope {
     function cycleFocusedProfile(dir) {
         if (!computerModel || currentHostIndex < 0) return
         computerModel.cycleHostProfile(currentHostIndex, dir)
+    }
+
+    // ── The profile list (8.7.1, #53) ────────────────────────────────────────
+    // Here the count IS the question, unlike the cycle above: there is no list to open on a host
+    // without profiles. Read by AppShell for the Start prompt.
+    readonly property bool focusedHasProfiles: currentHost ? currentHost.profileCount >= 1 : false
+
+    // Drops the list from the card's profile badge: Start / W, the status bar's prompt, or a click
+    // on the badge. ⚠️ 8.8.0: holding LT/RT no longer opens it (8.7.1 did, from Home and the host
+    // page) — LT/RT step one profile on the press again, and the list lives on Home only.
+    function openProfileList() {
+        if (!focusedHasProfiles || currentHostIndex < 0 || profileListPopup.opened) return
+        profileListPopup.hostUuid   = hostUuidAt(currentHostIndex)
+        profileListPopup.hostName   = currentHost ? currentHost.name : ""
+        profileListPopup.anchorItem = hostStage.profileAnchor
+        profileListPopup.open()
     }
 
     // Opens the POWER chooser for the selected host. Used by the status-bar "X Shutdown"
@@ -188,6 +205,9 @@ FocusScope {
         powerDialog.clientModes        = SystemProperties.clientPowerModes()
         powerDialog.clientUpdateState  = SystemProperties.updatesPending() ? "pending" : "none"
         powerDialog.hostUpdateState    = "unavailable"
+        // Without a host the popup is there to switch this device off: no memory (8.5.1).
+        powerDialog.rememberedHost     = ""
+        powerDialog.rememberedClient   = ""
         powerDialog.open()
     }
 
@@ -219,6 +239,21 @@ FocusScope {
     property string wakeHostName : ""
     property int    wakeStep : 0        // mirrors WakeDialog's step rows
     property bool   wakeActive : false
+
+    /*
+     * 8.8.2: the per-host probes (STATUS, NETINFO, LOCKSTATE, the access state) stop while
+     * nobody can see what they feed: the window hidden for a stream, or minimized. They used
+     * to go on for the whole stream, a signed TCP request each, because this screen is never
+     * unloaded.
+     *
+     * ⚠️ Never while a flow is listening to their replies: the wake and the unlock before a
+     * launch read LOCKSTATE, and the link-restore watch has no poller of its own, it reads
+     * the probe's NETINFO.
+     */
+    readonly property int  _windowVisibility: Window.window ? Window.window.visibility : Window.Windowed
+    readonly property bool _probesHeld: (_windowVisibility === Window.Hidden
+                                         || _windowVisibility === Window.Minimized)
+                                        && !unlockBusy && !linkRestoreActive
     property string wakeDetail : ""
 
     // The pad is up and doing its own LOCKSTATE polling. Without this we would answer those
@@ -285,6 +320,9 @@ FocusScope {
     }
 
     function startWake(idx, hostName) {
+        // A launch is unlocking a host (#35) and owns the Desktop session's close; the wake
+        // would share _waitingForQuit with it. Seconds at most, and a wake is pressed again.
+        if (_lcUuid !== "") return
         wakeUuid     = hostUuidAt(idx)
         wakeHostName = hostName
         wakeStep      = 0
@@ -343,6 +381,7 @@ FocusScope {
         wakeActive     = false
         wakeUnlocking  = false
         _waitingForQuit = false
+        _afterQuit     = ""
         wakeUuid       = ""
         wakeWaitTimer.stop()
         appListWaitTimer.stop()
@@ -417,6 +456,24 @@ FocusScope {
             appShell.showApps(h.index, computerModel, false,
                               h.name, h.address, h.gpuModel, h.isTailscaleClone)
             return
+        }
+
+        // A locked host gets the PIN pad first (7.0.0, #35): see launchWhenUnlocked(). The
+        // launch itself may therefore run seconds from now, so it finds the host again by uuid.
+        var uuid = hostUuidAt(h.index)
+        launchWhenUnlocked(h.index, h.name,
+                           function () { homeScreen._startLastPlayed(uuid, h, lp) }, "home")
+    }
+
+    function _startLastPlayed(uuid, h, lp) {
+        var idx = hostIndexOf(uuid)
+        if (idx < 0) return                         // the host was removed meanwhile
+        if (idx !== h.index) {
+            // The rows moved while the PIN pad was up: the same host, read from its new row.
+            var moved = {}
+            for (var k in h) moved[k] = h[k]
+            moved.index = idx
+            h = moved
         }
 
         // showHidden = true, like the unlock flow: this is not the user browsing a library,
@@ -530,27 +587,90 @@ FocusScope {
         stackView.push(segue)
     }
 
-    function _wakeStartUnlock() {
+    /*
+     * Opens the PIN pad: a hidden Desktop session on the host, carrying the keystrokes to its
+     * logon screen. Shared by the wake and by a launch that finds the host locked (7.0.0, #35).
+     *
+     * Returns "" once the pad is on its way, "wait" when the host's app list has no Desktop
+     * entry (yet — after a wake it may simply not have arrived), or the line to show.
+     * `beforePush`, when given, runs just before the segue is pushed: the wake closes its
+     * dialog there, before the push, so the focus the popup hands back lands on nothing that
+     * matters and the segue takes it afterwards.
+     */
+    function _openUnlockPad(uuid, hostName, resultFn, beforePush, rejoin) {
+        var idx = hostIndexOf(uuid)
+        if (idx < 0) return qsTr("Could not open the PIN pad")
+
         var comp = Qt.createComponent("StreamSegue.qml")
         if (comp.status !== Component.Ready) {
             console.warn("[unlock] StreamSegue.qml not ready:", comp.errorString())
-            wakeDetail = qsTr("Could not open the PIN pad")
-            return
+            return qsTr("Could not open the PIN pad")
         }
 
-        // The Desktop app: the host has nothing else to offer while nobody is logged in, and
-        // this session is only a carrier for keystrokes anyway.
-        //
+        var session = null
+        if (rejoin) {
+            // A game is already running on the host (Unlock on a busy host): the carrier is a
+            // rejoin of that session, never a Desktop launch — the server runs one app at a
+            // time, and the Desktop would have to replace the game. Nothing is closed after.
+            session = computerModel.createSessionForCurrentGame(idx)
+        }
+        else {
+            // The Desktop app: the host has nothing else to offer while nobody is logged in,
+            // and this session is only a carrier for keystrokes anyway.
+            // showHidden = true: this is not the user browsing a library, it is us looking for
+            // one specific entry. Someone who hid Desktop from their grid still needs it here.
+            unlockAppModel.initialize(ComputerManager, idx, true)
+            // Either name the server gives it — see isDesktopName() in nvapp.h.
+            var appIndex = unlockAppModel.indexOfDesktop()
+            if (appIndex < 0) return "wait"
+            session = unlockAppModel.createSessionForApp(appIndex)
+        }
+        if (!session) {
+            console.warn("[unlock] could not create the session")
+            return qsTr("Could not open the PIN pad")
+        }
+        session.setUnlockMode(true)
+        if (!rejoin) _unlockCarrierUuid = uuid
+
+        // Declared before the session exists, so the host has the mark in hand by the time
+        // its streaming server reports a client.
+        // Not for a rejoin: there the host already holds a session, and this is a reconnect to
+        // it. A suppressed start would skip the host's own "reconnected within the grace"
+        // handling, and the session the user is about to resume could expire under the pad.
+        if (!rejoin) computerModel.markUnlockSession(idx, true)
+
+        // A binding, not the number: the segue polls the lock state for as long as the pad
+        // is up and ends the unlock mark afterwards, and the rows can move meanwhile.
+        var segue = comp.createObject(stackView, {
+            "appName":        "Desktop",
+            "session":        session,
+            "unlockMode":     true,
+            "computerModel":  computerModel,
+            "pcIndex":        Qt.binding(function() { return homeScreen.hostIndexOf(uuid) }),
+            "hostName":       hostName,
+            "onUnlockResultFn": resultFn
+        })
+        if (Window.window) Window.window.markStreamLaunching()
+
+        if (beforePush) beforePush()
+        stackView.push(segue)
+        return ""
+    }
+
+    function _wakeStartUnlock() {
+        var r = _openUnlockPad(wakeUuid, wakeHostName,
+                               function (ok) { homeScreen._wakeUnlockDone(ok) },
+                               function () {
+                                   homeScreen.wakeUnlocking = true
+                                   wakeDialog.close()
+                               })
+        if (r === "") return
+
         // The list may not be here yet. The poller fetches it only once the host is online and
         // paired, while we get here as soon as StreamTweak approves us — a different timer, so
         // the two race. Waiting is right; giving up silently, which is what this did first, is
         // indistinguishable from the feature being broken.
-        // showHidden = true: this is not the user browsing a library, it is us looking for one
-        // specific entry. Someone who hid Desktop from their grid still needs it here.
-        unlockAppModel.initialize(ComputerManager, wakeIndex, true)
-        // Either name the server gives it — see isDesktopName() in nvapp.h.
-        var appIndex = unlockAppModel.indexOfDesktop()
-        if (appIndex < 0) {
+        if (r === "wait") {
             if (appListWaitTimer.tries < 20) {
                 appListWaitTimer.tries++
                 appListWaitTimer.restart()
@@ -560,50 +680,27 @@ FocusScope {
             wakeDetail = qsTr("This host has no Desktop entry")
             return
         }
-
-        var session = unlockAppModel.createSessionForApp(appIndex)
-        if (!session) {
-            console.warn("[unlock] could not create the session")
-            wakeDetail = qsTr("Could not open the PIN pad")
-            return
-        }
-        session.setUnlockMode(true)
-        _unlockCarrierUuid = wakeUuid
-
-        // Declared before the session exists, so the host has the mark in hand by the time
-        // its streaming server reports a client.
-        computerModel.markUnlockSession(wakeIndex, true)
-        wakeUnlocking = true
-
-        // A binding, not the number: the segue polls the lock state for as long as the pad
-        // is up and ends the unlock mark afterwards, and the rows can move meanwhile.
-        var carrierUuid = wakeUuid
-        var segue = comp.createObject(stackView, {
-            "appName":        "Desktop",
-            "session":        session,
-            "unlockMode":     true,
-            "computerModel":  computerModel,
-            "pcIndex":        Qt.binding(function() { return homeScreen.hostIndexOf(carrierUuid) }),
-            "hostName":       wakeHostName,
-            "onUnlockResultFn": function (ok) { homeScreen._wakeUnlockDone(ok) }
-        })
-        if (Window.window) Window.window.markStreamLaunching()
-
-        wakeDialog.close()
-        stackView.push(segue)
+        wakeDetail = r
     }
 
     function _wakeUnlockDone(ok) {
         wakeUnlocking = false
         if (!ok) { _endWake(); return }
-
-        // Disconnecting is not enough. The streaming server keeps a session alive on purpose
-        // so it can be resumed, so the host would go on reporting itself as streaming — and
-        // opening it afterwards would show a session nobody asked for. Ask it to close the app.
-        //
-        // And wait for that to finish before touching the link: the host refuses to renegotiate
-        // its adapter while a session is running, so matching now would be quietly discarded.
+        _noteUnlocked(wakeUuid)
         console.log("[unlock] unlocked — closing the Desktop session on the host")
+        _closeUnlockSession("wake")
+    }
+
+    // Disconnecting is not enough. The streaming server keeps a session alive on purpose so it
+    // can be resumed, so the host would go on reporting itself as streaming — and opening it
+    // afterwards would show a session nobody asked for. Ask it to close the app.
+    //
+    // And wait for that to finish before going on: the host refuses to renegotiate its adapter
+    // while a session is running, so a link match now would be quietly discarded — and a launch
+    // now would go out as a resume of the Desktop's session (Session reads currentGameId).
+    // `then` says what comes after: "wake" (the link match) or "launch" (#35).
+    function _closeUnlockSession(then) {
+        _afterQuit = then
         _waitingForQuit = true
         quitWaitTimer.restart()
         unlockAppModel.quitRunningApp()
@@ -611,6 +708,198 @@ FocusScope {
 
     // Set while the host is being asked to close the unlock session.
     property bool _waitingForQuit : false
+    property string _afterQuit : ""
+
+    /*
+     * ── A launch that finds the host locked (7.0.0, issue #35) ───────────────────────────
+     *
+     * The PIN pad used to exist only inside the wake: a host powered on any other way — by
+     * hand, by a home-automation plug, by a wake sent from another device — reached the launch
+     * sitting at its lock screen, and the stream opened on a logon screen the pad cannot type
+     * into. Now every NEW launch asks LOCKSTATE first, and on a locked host runs the same
+     * unlock the wake runs, then the launch the user chose.
+     *
+     * ⚠️ Only new launches. Rejoining a running session cannot be done this way: the carrier
+     * is a Desktop session, and the server runs one app at a time, so opening it would mean
+     * quitting the game being rejoined. A swap (QuitSegue) and a host control are left alone
+     * for the same reason — a session is already up.
+     *
+     * ⚠️ Silence is never "locked". Only a host that says locked gets the pad; no answer, an
+     * old host, the integration off, an unapproved client: the launch goes ahead exactly as it
+     * always has. And the wait for the answer is capped well below the bridge's own 3 s, so a
+     * host whose StreamTweak is down costs a launch at most lockCheckTimer.interval.
+     *
+     * Nothing on the host had to change: LOCKSTATE, UNLOCKBEGIN and the suppression of the
+     * carrier session are the wake's (StreamTweak 8.1.0, double start lines 9.0.0).
+     */
+    property string _lcUuid     : ""        // the host being checked or unlocked
+    property string _lcHostName : ""
+    property var    _lcLaunchFn : null
+    property string _lcOwner    : ""        // "apps" | "home" — see dropLaunchWhenUnlocked()
+    property bool   _lcAsking   : false     // LOCKSTATE asked, no answer yet
+
+    function launchWhenUnlocked(idx, hostName, launchFn, owner) {
+        if (!launchFn) return
+        // One at a time: a second A while the first is being checked or unlocked is dropped,
+        // as the launch guards drop a second push.
+        if (_lcUuid !== "") return
+        // A wake has already dealt with the lock — it is past its own LOCKSTATE by the time a
+        // launch can be pressed — and the integration off means nobody could answer.
+        if (wakeActive || idx < 0 || !computerModel.streamTweakEnabled(idx)) {
+            launchFn()
+            return
+        }
+
+        _lcUuid     = hostUuidAt(idx)
+        _lcHostName = hostName
+        _lcLaunchFn = launchFn
+        _lcOwner    = owner || ""
+        _lcAsking   = true
+        lockCheckTimer.restart()
+        // May answer before it returns (bridge not allowed → supported=false at once): the
+        // state above is already set for it.
+        computerModel.requestLockState(idx)
+    }
+
+    // The page that asked for the launch is going away (AppsScreen, when the user leaves it
+    // while the unlock settles). The unlock may finish; the launch must not follow.
+    function dropLaunchWhenUnlocked(owner) {
+        if (_lcUuid !== "" && _lcOwner === owner) _lcLaunchFn = null
+    }
+
+    function _lcAnswered(supported, locked) {
+        _lcAsking = false
+        lockCheckTimer.stop()
+        if (supported && locked) {
+            console.log("[unlock] the host is locked — PIN pad before the launch")
+            _lcStartUnlock()
+            return
+        }
+        _lcLaunch()
+    }
+
+    Timer {
+        id: lockCheckTimer
+        interval: 1500
+        onTriggered: {
+            if (!homeScreen._lcAsking) return
+            homeScreen._lcAsking = false
+            console.log("[unlock] no answer to LOCKSTATE in time — launching")
+            homeScreen._lcLaunch()
+        }
+    }
+
+    function _lcStartUnlock() {
+        var r = _openUnlockPad(_lcUuid, _lcHostName,
+                               function (ok) { homeScreen._lcUnlockDone(ok) }, null, _lcRejoin)
+        if (r === "") return
+        if (!_lcLaunchFn) {
+            // The card's Unlock: there is no launch to fall back on, so say why nothing opened.
+            errorDialog.text = (r === "wait") ? qsTr("This host has no Desktop entry") : r
+            errorDialog.helpText = ""
+            errorDialog.open()
+            _lcEnd()
+            return
+        }
+        // No pad to offer — most likely no Desktop entry on this host. The launch goes ahead as
+        // it would have before #35: a stream on the logon screen is no worse than no stream.
+        console.warn("[unlock] cannot open the PIN pad before the launch ("
+                     + (r === "wait" ? "no Desktop entry" : r) + ") — launching")
+        _lcLaunch()
+    }
+
+    function _lcUnlockDone(ok) {
+        if (!ok) {
+            // Backed out of the pad, or the host dropped the session: nothing is launched. The
+            // user is back where they pressed, and pressing again asks again.
+            console.log("[unlock] PIN pad closed without unlocking — no launch")
+            _lcEnd()
+            return
+        }
+        _noteUnlocked(_lcUuid)
+        if (_lcRejoin) {
+            // The carrier was the running game itself: it stays running, nothing to close.
+            console.log("[unlock] unlocked — the running session is left as it was")
+            _lcEnd()
+            return
+        }
+        console.log("[unlock] unlocked — closing the Desktop session"
+                    + (_lcLaunchFn ? ", then launching" : ""))
+        _closeUnlockSession("launch")
+    }
+
+    /*
+     * ── Unlock from the card (7.0.0, #35) ────────────────────────────────────────────────
+     *
+     * A host at its lock screen is not opened: its card's first button reads Unlock instead of
+     * Open (HostStage.locked) and starts the PIN pad straight away — the same carrier and the
+     * same close as a launch that found the host locked, with nothing launched after. On a
+     * host already running a game the carrier is a rejoin of that game (_openUnlockPad), which
+     * is left running.
+     */
+    property bool _lcRejoin : false
+
+    readonly property bool unlockBusy : _lcUuid !== "" || wakeActive
+
+    function startUnlock(h) {
+        if (!h || !h.online || !h.paired || _lcUuid !== "" || wakeActive || _launchBlocked())
+            return
+        _lcUuid     = hostUuidAt(h.index)
+        _lcHostName = h.name
+        _lcLaunchFn = null
+        _lcOwner    = "home"
+        _lcRejoin   = h.busy === true
+        console.log("[unlock] Unlock pressed" + (_lcRejoin ? " — rejoining the running session" : ""))
+        _lcStartUnlock()
+    }
+
+    // We know before the next poll does: the card goes back to Open, and the host page is not
+    // left for Home on a stale "locked" in the seconds before LOCKSTATE says so itself.
+    function _noteUnlocked(uuid) {
+        var p = hostProbes.itemAt(hostIndexOf(uuid))
+        if (p) { p.stLocked = false; p._lockMisses = 0 }
+    }
+
+    // For AppShell, which leaves the host page when its host is locked.
+    signal hostLockChanged(string uuid, bool locked)
+    function isHostLocked(uuid) {
+        var p = hostProbes.itemAt(hostIndexOf(uuid))
+        return !!p && p.stLocked === true
+    }
+
+    function _lcAfterQuit() {
+        // quitAppCompleted without an error is only emitted once the host reports no game, but
+        // the fallback timer and a failed quit come here too. A launch with the Desktop still
+        // running would go out as a resume of it, so in that case nothing is launched.
+        if (unlockAppModel.getRunningAppId() !== 0) {
+            console.warn("[unlock] the Desktop session is still running on the host — not launching")
+            _lcEnd()
+            return
+        }
+        _lcLaunch()
+    }
+
+    function _lcLaunch() {
+        var fn = _lcLaunchFn
+        _lcEnd()
+        if (fn) fn()
+    }
+
+    function _lcEnd() {
+        // As in _endWake(): the carrier mark goes now if the host has stopped reporting it,
+        // otherwise the probe clears it when it does.
+        if (_unlockCarrierIndex >= 0) {
+            var carrier = hostProbes.itemAt(_unlockCarrierIndex)
+            if (!carrier || !carrier.pBusy) _unlockCarrierUuid = ""
+        }
+        lockCheckTimer.stop()
+        _lcAsking   = false
+        _lcRejoin   = false
+        _lcLaunchFn = null
+        _lcOwner    = ""
+        _lcHostName = ""
+        _lcUuid     = ""
+    }
 
     /*
      * ── The PIN unlock's own session is never "Streaming now" (6.0.0) ────────────────────
@@ -664,7 +953,10 @@ FocusScope {
         if (!_waitingForQuit) return
         _waitingForQuit = false
         quitWaitTimer.stop()
-        _wakeMatchLink()
+        var then = _afterQuit
+        _afterQuit = ""
+        if (then === "launch") _lcAfterQuit()
+        else                   _wakeMatchLink()
     }
 
     Timer {
@@ -812,8 +1104,19 @@ FocusScope {
         }
 
         function onLockStateReceived(index, supported, locked) {
+            // A launch's check (#35). Before the wake's guard, and never both: a launch
+            // during a wake does not ask (launchWhenUnlocked).
+            if (homeScreen._lcAsking && index === homeScreen.hostIndexOf(homeScreen._lcUuid)) {
+                homeScreen._lcAnswered(supported, locked)
+                return
+            }
             if (!homeScreen.wakeActive || homeScreen.wakeUnlocking) return
             if (index !== homeScreen.wakeIndex) return
+            // Only while the wake is still waiting for this answer. The probes poll LOCKSTATE
+            // too (stLocked), so a second reply can land after the first has already moved the
+            // wake on — into the pad, the app-list retry or the link match — and it must not
+            // start any of them a second time.
+            if (!wakeWaitTimer.running) return
             // No answer yet: StreamTweak is still coming up, or this host does not know the
             // command. The two look identical from here, so we keep asking until the wait
             // times out — and a host that genuinely never answers ends up where it belongs,
@@ -911,6 +1214,7 @@ FocusScope {
         target: AppUpdate
         property: "installBlocked"
         value: homeScreen.wakeActive
+               || homeScreen._lcUuid !== ""
                || homeScreen.linkRestoreActive
                || homeScreen.linkAskHostIndex >= 0
                || homeScreen.linkAskProbing
@@ -1182,26 +1486,6 @@ FocusScope {
         return model
     }
 
-    // Per-host colour pair — deterministic by host name hash. Feeds the stage backdrop, and
-    // is the fallback for as long as a host has no picture of its own.
-    function hostColorPair(name) {
-        if (!name || name.length === 0) return ["#1c1c1c", "#0d0d0d"]
-        var h = 0
-        for (var i = 0; i < name.length; i++) {
-            h = ((h << 5) - h) + name.charCodeAt(i)
-            h |= 0
-        }
-        var palette = [
-            ["#1a3a5c", "#0a1a2e"],   // navy blue
-            ["#3a1a4c", "#1a0a26"],   // purple
-            ["#4a1e1a", "#260a08"],   // rust red
-            ["#1a4c2e", "#0a2618"],   // forest green
-            ["#4c3a0e", "#261c06"],   // amber
-            ["#0e3a4c", "#061c26"]    // teal
-        ]
-        return palette[Math.abs(h) % palette.length]
-    }
-
     function formatStreamTweakStatus(raw) {
         if (raw === "" || raw === null || raw === undefined) return ""
         var mbps = parseInt(raw)
@@ -1250,12 +1534,36 @@ FocusScope {
             readonly property bool   stEnabled: model.streamTweakEnabled
 
             property string stAuth: ""
+
+            /*
+             * The host is at its lock screen (7.0.0, #35): the card offers Unlock instead of
+             * Open, and the host page is not entered — AppShell leaves it for Home when this
+             * turns true while it is open. Polled with LOCKSTATE beside STATUS and NETINFO.
+             *
+             * ⚠️ Silence is not "unlocked" and not "locked" either: one missed answer keeps the
+             * last value, and only three in a row drop it — so a single slow reply does not
+             * flip the button, and a host whose StreamTweak has gone does not stay "locked".
+             */
+            property bool   stLocked: false
+            property int    _lockMisses: 0
+            onStLockedChanged: homeScreen.hostLockChanged(homeScreen.hostUuidAt(index), stLocked)
+            onPOnlineChanged:  if (!pOnline) { stLocked = false; _lockMisses = 0 }
+            onStAuthChanged:   if (stAuth !== "authorized") { stLocked = false; _lockMisses = 0 }
+
+            // 8.0.0: from the CAPS reply that opens every access check — does the host have
+            // the host-section verbs (StreamTweak 10.0.0), and which version is it.
+            property bool   stHostSection: false
+            property string stHostVersion: ""
+
             property bool   stLinkChanging: false
             property double stLinkChangedAt: 0
             property string stSpeedRaw: ""
             property bool   stAllowsLink: false
             property bool   stSwitched: false
             property int    stLocalMbps: 0
+            // 8.8.2: this host answers NETINFO, which carries the speed too. STATUS is then
+            // the same question asked twice, and its timer stays off.
+            property bool   stNetInfoOk: false
 
             // The host refuses SETSPEED while it considers a session to be running, and it goes on
             // counting one for its whole inactivity grace after the client disconnects. So this
@@ -1323,6 +1631,8 @@ FocusScope {
                     statusUnknown:     model.statusUnknown,
                     wakeable:          model.wakeable,
                     asleep:            model.asleep,
+                    serverRestart:     model.serverRestart,
+                    pyroWaveTest:      model.pyroWaveTest,
                     serverSupported:   model.serverSupported,
                     details:           model.details,
                     address:           model.address,
@@ -1339,16 +1649,17 @@ FocusScope {
                     // the next launch would actually use. stOverride re-resolves on
                     // activeProfileSlot, so cycling profiles with LB/RB moves the badges.
                     streamOverride:    stOverride,
-                    stageColorFrom:    model.stageColorFrom,
-                    stageColorTo:      model.stageColorTo,
                     stageImage:        model.stageImage,
-                    stageSeedColor:    model.stageSeed,
                     stageOpacity:      model.stageOpacity,
                     auth:              stAuth,
+                    stEnabled:         stEnabled,
+                    hostSection:       stHostSection,
+                    hostVersion:       stHostVersion,
                     linkText:          homeScreen.formatStreamTweakStatus(stSpeedRaw),
                     willSwitchLink:    willSwitchLink,
                     cantSwitchLink:    cantSwitchLink,
                     localMbps:         stLocalMbps,
+                    hostMbps:          stHostMbps,
                     linkChanging:      stLinkChanging,
                     linkSwitched:      stSwitched,
                     allowsLinkControl: stAllowsLink,
@@ -1357,6 +1668,7 @@ FocusScope {
                     // action LinkMatcher will decline without a word.
                     matchLink:         stMatchLink,
                     sessionActive:     stSessionActive,
+                    locked:            stLocked,
                     lastPlayed:        stLastPlayed,
                     // What the host is streaming right now (6.0.0). Read here, on every push,
                     // because model.busy and model.online are in _watch: a session starting or
@@ -1406,10 +1718,10 @@ FocusScope {
                 model.wakeable, model.serverSupported, model.address, model.physicalAddress,
                 model.tailscaleAddress, model.hasTailscale, model.tailscaleActive,
                 model.gpuModel, model.profileCount, model.activeProfileSlot,
-                model.activeProfileName, model.stageColorFrom, model.stageColorTo,
-                model.stageImage, model.stageSeed, model.stageOpacity, stAuth, stSpeedRaw,
+                model.activeProfileName, model.stageImage,
+                model.stageOpacity, model.serverRestart, stAuth, stSpeedRaw, stEnabled, stHostSection, stHostVersion,
                 willSwitchLink, cantSwitchLink, stLastPlayed, stMatchLink,
-                stLinkChanging, stSwitched, stAllowsLink, stSessionActive,
+                stLinkChanging, stSwitched, stAllowsLink, stSessionActive, stLocked,
                 // What _runningFor() reads to hide the PIN unlock's own session (6.0.0).
                 homeScreen.wakeActive, homeScreen.wakeIndex, homeScreen._unlockCarrierIndex
             ]
@@ -1428,6 +1740,9 @@ FocusScope {
                     return
                 }
                 stAuth = ""
+                stNetInfoOk = false
+                stHostSection = false
+                stHostVersion = ""
                 stSpeedRaw = ""
                 stAllowsLink = false
                 stSwitched = false
@@ -1435,6 +1750,8 @@ FocusScope {
                 stLinkChanging = false
                 stLocalMbps = 0
                 stLastPlayed = ({})
+                stLocked = false
+                _lockMisses = 0
             }
 
             Component.onCompleted: {
@@ -1460,8 +1777,13 @@ FocusScope {
                 // during a stream too, since HomeScreen is never unloaded. The revocation
                 // path still works: it fires while we believe we ARE authorized, which is
                 // exactly when this timer runs.
+                // 8.8.2: not on a host that answers NETINFO (every one since 8.1.0): that reply
+                // carries the speed and now notices a revocation too. And not while the probes
+                // are held (see _probesHeld).
                 running: probe.stEnabled && model.online && model.paired
-                         && (probe.stAuth === "authorized" || probe.stAuth === "open")
+                         && (probe.stAuth === "open"
+                             || (probe.stAuth === "authorized" && !probe.stNetInfoOk))
+                         && !homeScreen._probesHeld
                 onTriggered: homeScreen.computerModel.requestStreamTweakStatus(index)
             }
 
@@ -1474,8 +1796,24 @@ FocusScope {
                 interval: 2000
                 repeat: true
                 running: probe.stEnabled && model.online && model.paired
-                         && probe.stAuth === "authorized"
+                         && probe.stAuth === "authorized" && !homeScreen._probesHeld
+                // Asked at once when the probes come back from a hold, so the card is not two
+                // seconds behind on the way back from a stream.
+                triggeredOnStart: true
                 onTriggered: homeScreen.computerModel.requestHostNetInfo(index)
+            }
+
+            // LOCKSTATE, for stLocked. Same gate as NETINFO: only an approved client is answered.
+            // ⚠️ Its replies also reach the wake, the launch check and the PIN pad's own polling,
+            // which all listen to lockStateReceived; each of them guards on its own state, and
+            // an answer from here means what their own request would have meant.
+            Timer {
+                interval: 2500
+                repeat: true
+                running: probe.stEnabled && model.online && model.paired
+                         && probe.stAuth === "authorized" && !homeScreen._probesHeld
+                triggeredOnStart: true
+                onTriggered: homeScreen.computerModel.requestLockState(index)
             }
 
             // Poll the access state until it settles (authorized, or "open" when the host
@@ -1489,6 +1827,7 @@ FocusScope {
                 // nor "open", so the settling condition was never met.
                 running: probe.stEnabled && model.online && model.paired
                          && probe.stAuth !== "authorized" && probe.stAuth !== "open"
+                         && !homeScreen._probesHeld
                 onTriggered: homeScreen.computerModel.requestStreamTweakAuth(index)
             }
 
@@ -1499,6 +1838,16 @@ FocusScope {
                     // Held while the adapter is renegotiating: the values it returns in that
                     // window are the transition, not the answer.
                     if (idx === index && !probe.stLinkChanging) probe.stSpeedRaw = status
+                }
+
+                function onLockStateReceived(idx, supported, locked) {
+                    if (idx !== index) return
+                    if (supported) {
+                        probe._lockMisses = 0
+                        probe.stLocked = locked
+                        return
+                    }
+                    if (++probe._lockMisses >= 3) probe.stLocked = false
                 }
 
                 function onHostNetInfoReceived(idx, info) {
@@ -1536,12 +1885,24 @@ FocusScope {
                     }
 
                     probe.stLinkChanging = false
+                    // A settled answer: this host speaks NETINFO, so STATUS can stop (8.8.2).
+                    // With STATUS off, "no speed" has to be said here as STATUS said it.
+                    probe.stNetInfoOk = true
                     if (info.currentMbps !== undefined && info.currentMbps > 0)
                         probe.stSpeedRaw = String(info.currentMbps)
+                    else if (info.currentMbps !== undefined)
+                        probe.stSpeedRaw = "UNKNOWN"
+                }
+
+                function onStreamTweakCapsReceived(idx, hostSection, version) {
+                    if (idx !== index) return
+                    probe.stHostSection = hostSection
+                    probe.stHostVersion = version
                 }
 
                 function onStreamTweakAuthReceived(idx, state, pin) {
                     if (idx !== index) return
+                    if (state !== "authorized") probe.stNetInfoOk = false
                     probe.stAuth = state
                     // Once authorized, learn the host's Tailscale endpoint (if any) and
                     // measure the link we reach it on — the speed the host will be asked to
@@ -1577,13 +1938,14 @@ FocusScope {
     onTabIndexChanged: {
         if (addTabSelected) currentHost = null
         _selectedUuid = addTabSelected ? "" : hostUuidAt(tabIndex)
+        _slideStage()
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     // Navigation
     // ═════════════════════════════════════════════════════════════════════════
     /*
-     * Two zones, one row each, and the triggers cut across both.
+     * Two zones, one row each, and the shoulders (host) and triggers (profile) cut across both.
      *
      * The keys live on a full-size focus sink behind the visuals rather than on the root
      * FocusScope, mirroring what the old grid did: the scope hands active focus to its
@@ -1600,32 +1962,42 @@ FocusScope {
             return true
         }
 
-        // LT / RT — switch host from anywhere on Home. They are the reason changing host
-        // stopped costing a D-pad stop. LB/RB stay on prev/next profile, which is exactly
-        // why the hosts had to go on the triggers.
+        // LT / RT — the focused host's profile, as on the host page (7.0.0: they switched the
+        // host until 13/10/2026; the hosts are on LB/RB now, handled in AppShell with
+        // PgUp/PgDn so they work wherever the focus is).
         // ⚠️ Handled here, on the page, rather than as global Shortcuts. Key events reach the
         // focused item first, so a host-name field or the add-host dialog swallows the letter
         // and typing "Peppe" cannot shut a machine down. A global Shortcut would fire through
         // any text field, which is the reason single-key shortcuts are usually avoided at all.
         Keys.onPressed: function(event) {
             if (event.key === Qt.Key_F14) {
-                _selectTab(homeScreen.tabIndex - 1)
+                homeScreen.cycleFocusedProfile(-1)
                 event.accepted = true
             } else if (event.key === Qt.Key_F15) {
-                _selectTab(homeScreen.tabIndex + 1)
+                homeScreen.cycleFocusedProfile(1)
                 event.accepted = true
             }
-            // Keyboard equivalents of the controller prompts. Q/E mirror LB/RB (profile);
-            // PgUp/PgDn mirror LT/RT (host) and are handled in AppShell so they work wherever
-            // the focus is, exactly like the triggers do.
+            // Keyboard equivalents of the controller prompts. Q/E mirror LT/RT (profile);
+            // PgUp/PgDn mirror LB/RB (host) and are handled in AppShell so they work wherever
+            // the focus is, exactly like the shoulders do.
             else if (event.key === Qt.Key_Q) {
                 homeScreen.cycleFocusedProfile(-1); event.accepted = true
             } else if (event.key === Qt.Key_E) {
                 homeScreen.cycleFocusedProfile(1);  event.accepted = true
+            }
+            // The profile list (8.7.1, #53): Start on the pad (Key_F18, free on Home), W on the
+            // keyboard — between Q and E, as the list sits between the two triggers.
+            else if (event.key === Qt.Key_F18 || event.key === Qt.Key_W) {
+                if (!event.isAutoRepeat) homeScreen.openProfileList()
+                event.accepted = true
             } else if (event.key === Qt.Key_P) {
                 homeScreen.openPowerForCurrent(); event.accepted = true
             } else if (event.key === Qt.Key_S) {
                 if (appShell) appShell.openSettings(); event.accepted = true
+            }
+            // The theme toggle (7.0.0): right stick click (Key_F19) on the pad, T on the keyboard.
+            else if (event.key === Qt.Key_F19 || event.key === Qt.Key_T) {
+                if (appShell) appShell.toggleTheme(); event.accepted = true
             }
         }
 
@@ -1773,11 +2145,11 @@ FocusScope {
             spacing: homeScreen._px(14)
 
             // One host is enough: the strip always carries "Add a host" as its last tab, so
-            // there are still two stops and the triggers do move. Requiring two would hide
+            // there are still two stops and the shoulders do move. Requiring two would hide
             // them exactly when someone is looking for how to add another.
             Repeater {
                 model: homeScreen.hostCount >= 1
-                       ? [{ btn: "LT", key: "PgUp", dir: -1 }] : []
+                       ? [{ btn: "LB", key: "PgUp", dir: -1 }] : []
                 delegate: Item {
                     anchors.verticalCenter: parent.verticalCenter
                     width: homeScreen._px(44); height: homeScreen._px(30)
@@ -1820,10 +2192,17 @@ FocusScope {
                     height: homeScreen._px(40)
                     width: tabContent.implicitWidth + homeScreen._px(40)
                     radius: homeScreen._px(9)
-                    color: _selected || _hovered ? Theme.cardHigh : "transparent"
+                    // Glass (05/11/2026, variant A of docs/mockups/pulsanti): the selected host
+                    // is the wash tinted by the accent under a 55% hairline, the focus 22% under a
+                    // 2 px accent border, the pointer a plain wash. It was a solid Theme.cardHigh.
+                    color: _focused  ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.22)
+                         : _selected ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.18)
+                         : _hovered  ? Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
+                         :             "transparent"
                     border.width: _focused ? 2 : 1
-                    border.color: _focused  ? Theme.accent
-                                : _selected ? Theme.lineHigh
+                    border.color: _focused  ? Theme.accentFill
+                                : _selected ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.55)
+                                : _hovered  ? Theme.lineHigh
                                 :             "transparent"
 
                     Row {
@@ -1873,7 +2252,7 @@ FocusScope {
 
             Repeater {
                 model: homeScreen.hostCount >= 1
-                       ? [{ btn: "RT", key: "PgDn", dir: 1 }] : []
+                       ? [{ btn: "RB", key: "PgDn", dir: 1 }] : []
                 delegate: Item {
                     anchors.verticalCenter: parent.verticalCenter
                     width: homeScreen._px(44); height: homeScreen._px(30)
@@ -1899,8 +2278,29 @@ FocusScope {
     // ═════════════════════════════════════════════════════════════════════════
     // The stage — zone 2
     // ═════════════════════════════════════════════════════════════════════════
+    /*
+     * Changing host slides the stage (7.0.0): the new host's card comes in from the side of
+     * the direction you moved (LT/RT, or a tab clicked to the right or left) and fades up. The
+     * card's content swaps at once underneath; this is only how it arrives.
+     */
+    property int _lastTabIndex: 0
+    function _slideStage() {
+        var dir = tabIndex > _lastTabIndex ? 1 : -1
+        _lastTabIndex = tabIndex
+        if (Theme.reduceAnimations) return
+        stageShift.x = dir * homeScreen._px(60)
+        hostStage.opacity = 0.25
+        stageIn.restart()
+    }
+    ParallelAnimation {
+        id: stageIn
+        NumberAnimation { target: stageShift; property: "x"; to: 0; duration: 200; easing.type: Easing.OutCubic }
+        NumberAnimation { target: hostStage; property: "opacity"; to: 1; duration: 160; easing.type: Easing.OutCubic }
+    }
+
     HostStage {
         id: hostStage
+        transform: Translate { id: stageShift }
         anchors.top: tabStrip.bottom
         anchors.left: parent.left
         anchors.right: parent.right
@@ -1920,7 +2320,9 @@ FocusScope {
         paired:            _h ? _h.paired            : false
         statusUnknown:     _h ? _h.statusUnknown     : false
         wakeable:          _h ? _h.wakeable          : false
+        locked:            _h ? _h.locked === true   : false
         asleep:            _h ? _h.asleep            : false
+        serverRestart:     _h && _h.serverRestart ? _h.serverRestart : ""
         serverSupported:   _h ? _h.serverSupported   : true
         hasTailscale:      _h ? _h.hasTailscale      : false
         tailscaleActive:   _h ? _h.tailscaleActive   : false
@@ -1931,6 +2333,7 @@ FocusScope {
         activeProfileName: _h ? _h.activeProfileName : ""
         streamOverride:    (_h && _h.streamOverride) ? _h.streamOverride : ({})
         authState:         _h ? _h.auth              : ""
+        streamTweakReason: homeScreen.streamTweakReasonFor(_h)
         hostLinkText:      _h ? _h.linkText          : ""
         willSwitchLink:    _h ? _h.willSwitchLink    : false
         cantSwitchLink:    _h ? _h.cantSwitchLink    : false
@@ -1966,13 +2369,7 @@ FocusScope {
                        : _h.address)
                     : ""
 
-        // What the user picked for this host, or the colours derived from its name until
-        // they pick something. The fallback is not a placeholder — most hosts will keep it,
-        // and it already gives every host a colour of its own.
-        backdropFrom: (_h && _h.stageColorFrom && _h.stageColorFrom.length > 0)
-                      ? _h.stageColorFrom : homeScreen.hostColorPair(_h ? _h.name : "")[0]
-        backdropTo:   (_h && _h.stageColorTo && _h.stageColorTo.length > 0)
-                      ? _h.stageColorTo : homeScreen.hostColorPair(_h ? _h.name : "")[1]
+        // 7.0.0: the card is the theme's surface; a host may only add a picture over it.
         backdropImage: (_h && _h.stageImage) ? _h.stageImage : ""
         // Percent in the model, 0..1 on the card. The model already applies the default to a
         // host that never set one, so the fallback here only covers the moment before a record.
@@ -1989,6 +2386,9 @@ FocusScope {
             // can already do from anywhere.
             if (kind === "prevProfile") { homeScreen.cycleFocusedProfile(-1); return }
             if (kind === "nextProfile") { homeScreen.cycleFocusedProfile(1);  return }
+            // 8.7.1: a click on the profile badge drops the list (and, like the shoulders,
+            // leaves the pad's cursor where it was).
+            if (kind === "profileList") { homeScreen.openProfileList(); return }
 
             homeScreen.focusZone = 1
             navRoot.forceActiveFocus()
@@ -2001,8 +2401,10 @@ FocusScope {
     // ═════════════════════════════════════════════════════════════════════════
     // Everything the stage and the Options grid can ask for lands here. Keeping one switch
     // means the mouse, the D-pad and the face-button shortcuts cannot drift apart.
-    function runAction(kind) {
-        var h = currentHost
+    // `forHost` (8.0.0): a record from hostRecordFor(), when the host section asks for a host
+    // that is not necessarily the one selected on the strip.
+    function runAction(kind, forHost) {
+        var h = forHost ? forHost : currentHost
 
         switch (kind) {
         case "addHost":
@@ -2016,8 +2418,15 @@ FocusScope {
         if (!h) return
 
         switch (kind) {
+        case "unlock":
+            startUnlock(h)
+            break
+
         case "open":
             if (h.statusUnknown) return
+            // Locked between the card being drawn and the press: unlock rather than open a
+            // page AppShell would leave at once (7.0.0, #35).
+            if (h.locked) { startUnlock(h); return }
             if (!h.serverSupported) {
                 errorDialog.text = qsTr("The version of GeForce Experience on %1 is not supported by this build of StreamLight. You must update StreamLight to stream from %1.").arg(h.name)
                 errorDialog.helpText = ""
@@ -2062,9 +2471,10 @@ FocusScope {
             hostOptionsDialog.open()
             break
 
-        case "viewAllApps":
-            appShell.showApps(h.index, computerModel, true,
-                              h.name, h.address, h.gpuModel, h.isTailscaleClone)
+        case "pyrowaveTest":
+            pyroWaveTestDialog.hostUuid = hostUuidAt(h.index)
+            pyroWaveTestDialog.hostName = h.name
+            pyroWaveTestDialog.open()
             break
 
         case "tailscale":
@@ -2087,6 +2497,12 @@ FocusScope {
             renamePcDialog.open()
             break
 
+        case "wakeMac":
+            wakeMacDialog.pcUuid = hostUuidAt(h.index)
+            wakeMacDialog.pcName = h.name
+            wakeMacDialog.open()
+            break
+
         case "delete":
             deletePcDialog.pcUuid = hostUuidAt(h.index)
             deletePcDialog.pcName = h.name
@@ -2101,7 +2517,6 @@ FocusScope {
         case "background":
             stageBackgroundDialog.hostName     = h.name
             stageBackgroundDialog.currentImage = h.stageImage    || ""
-            stageBackgroundDialog.currentSeed  = h.stageSeedColor || ""
             stageBackgroundDialog.opacityMin     = homeScreen.computerModel.stageOpacityMin
             stageBackgroundDialog.currentOpacity = h.stageOpacity
                                                    || homeScreen.computerModel.stageOpacityDefault
@@ -2112,6 +2527,12 @@ FocusScope {
         case "requestStAuth":
             stForcePin(h.index)
             computerModel.requestStreamTweakAuth(h.index)
+            break
+
+        // 8.0.0: the host section, from StreamTweak's mark on the card.
+        case "streamtweak":
+            if (streamTweakReasonFor(h).length > 0) return
+            appShell.openHostSection(hostUuidAt(h.index), computerModel, h.name)
             break
 
         // Both directions of the same control. Restoring shows the chip and its "back to X"
@@ -2146,6 +2567,10 @@ FocusScope {
             } else {
                 powerDialog.hostUpdateState = "unavailable"
             }
+            // 8.5.1, issue #51: the popup opens on what was last confirmed on this host.
+            var choice = computerModel.hostPowerChoice(powerDialog.pcUuid)
+            powerDialog.rememberedHost    = choice.host
+            powerDialog.rememberedClient  = choice.client
             powerDialog.open()
             break
 
@@ -2155,66 +2580,146 @@ FocusScope {
         }
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    // StreamLight 8.0 — the host section (HostSectionScreen.qml)
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /*
+     * Why StreamTweak's logo on the card cannot open the section right now, or "" when it can.
+     * Shown greyed with this reason, never taken away (plan 8.0 / 10.0, "Accesso").
+     *
+     * ⚠️ Since 21/10/2026 the section also holds the integration's own switch for this host (its
+     * Setup tab, moved out of Settings), so it opens whenever there is a host to talk about: with
+     * StreamTweak switched off, not found, too old, pending or denied it opens on Setup alone,
+     * which says which. Only a host that is not paired — the bridge trusts the pairing — or is still
+     * being checked keeps it grey.
+     */
+    function streamTweakReasonFor(h) {
+        if (!h) return ""
+        if (h.statusUnknown)           return qsTr("Checking the host…")
+        if (!h.paired && h.online)     return qsTr("Pair this host first")
+        return ""
+    }
+
+    // The live record of a host, by uuid — what the card reads, for the section to read too.
+    function hostRecordFor(uuid) {
+        var p = hostProbes.itemAt(hostIndexOf(uuid))
+        return p ? p.record() : null
+    }
+
+    /*
+     * Runs one of the card's actions for a host the section names by uuid: "linkSpeed",
+     * "updateHost", "requestStAuth". Through runAction, so the section and the old Options
+     * tiles share one implementation — the restore watch, the update flow, the PIN pop-up.
+     */
+    function runActionFor(uuid, kind) {
+        var r = hostRecordFor(uuid)
+        if (r) runAction(kind, r)
+    }
+
+    /*
+     * The link control of the Dashboard's Network card: both directions and the four reasons
+     * for grey. Moved here from the Options tile it was until 7.0.x.
+     *
+     * The link, by hand. Not the 4.6.0 tile that was removed: that one sent PREPARE and let the
+     * *host* pick a speed it had configured, which is the whole design the 8.1.0 pair undid.
+     * This asks for the same speed the launch would ask for, so it can only agree with it —
+     * either putting the link back now, or getting it ready so the next launch doesn't have to
+     * wait. Greyed with the reason when the host isn't offering the control.
+     *
+     * ⚠️ Two ways to be unable to do this. The host refusing (allowsLinkControl), and the
+     * *client's own* matching being off — globally or by the active profile — which once left
+     * the control looking live while LinkMatcher declined in silence. Restoring is always
+     * sensible, so only the matching direction depends on the preference.
+     *
+     * ⚠️ The session clause applies to the matching direction only. A restore asked for during
+     * a live stream is not refused — the host schedules it and puts the link back once the
+     * stream is done — so greying that one would be lying the other way. Last in the chain
+     * because "matching is off" is the actionable reason when both are true.
+     */
+    function linkActionFor(uuid) {
+        var h = hostRecordFor(uuid)
+        if (!h || h.auth !== "authorized") return { shown: false }
+        var restoring = h.linkSwitched === true
+        // 8.0.0: matching that would change nothing is greyed too — this device's wired link is
+        // unknown here (Wi-Fi, Tailscale, no rate), or the host is not faster than it. Restoring is
+        // never affected: putting the link back is always a real change.
+        var why = h.linkChanging                     ? qsTr("changing")
+                : !h.allowsLinkControl               ? qsTr("host declined")
+                : (!restoring && !h.matchLink)       ? qsTr("matching is off")
+                : (!restoring && h.sessionActive)    ? qsTr("host busy")
+                : (!restoring && !(h.localMbps > 0)) ? qsTr("no wired link to compare from this device")
+                : (!restoring && !(h.hostMbps > h.localMbps)) ? qsTr("already at this device's speed")
+                : ""
+        return { shown: true, restoring: restoring,
+                 label: restoring ? qsTr("Restore NIC speed") : qsTr("Match link speed"),
+                 disabled: why.length > 0, reason: why,
+                 linkText: h.linkText, allowsLinkControl: h.allowsLinkControl === true }
+    }
+
     // Tiles for the Options popup: { kind, icon (emoji) | iconSource, label, danger? }.
+    // In the order of what you came for (09/10/2026): getting in (Tailscale, Wake),
+    // a test, reading about it, making it yours, and Delete at the very end. Since 8.0.0
+    // Options is the host as a streaming server; what StreamTweak does is in the host section.
     function menuItemsFor(h) {
         var items = []
-        if (h.online && h.paired)
-            items.push({ kind: "viewAllApps", icon: "🎮", label: qsTr("All Apps") })
+        // All Apps is gone (7.0.0): it opened the same page as Open on the card. Its one
+        // difference, showing hidden games, had nothing to show — nothing in StreamLight can
+        // hide a game — and its place went to PyroWave Test, so the grid stays at nine.
         // Tailscale: opens the host's apps over the 100.x endpoint. Greyed (non-clickable)
         // when Tailscale isn't installed on this client.
         if (h.online && h.paired && h.hasTailscale)
-            items.push({ kind: "tailscale", iconSource: "qrc:/res/tailscale.svg",
+            items.push({ kind: "tailscale", iconSource: Theme.light ? "qrc:/res/tailscale_dark.svg" : "qrc:/res/tailscale.svg",
                          label: qsTr("Tailscale"), disabled: !_clientHasTailscale,
                          reason: qsTr("not installed here") })
         if (!h.online && h.wakeable)
             items.push({ kind: "wake", icon: "⏰", label: qsTr("Wake") })
+        // 8.1.0 (issue #45): a second MAC for the magic packet, for a PC whose streaming card is
+        // not the one that wakes it. The note says one is set; NEW only while it has nothing to say.
+        var extraMac = computerModel.hostWakeMacs(h.index).extra || ""
+        items.push({ kind: "wakeMac", icon: "🔌", label: qsTr("Wake-on-LAN"),
+                     since: extraMac.length ? "" : "8.1.0",
+                     note: extraMac.length ? qsTr("+1 MAC") : "" })
+        // 8.0.0: Match / Restore link speed, Windows Update and Request Access moved to the
+        // host section (StreamTweak's mark on the card): its Dashboard and its access page. Their
+        // actions are still here — runAction("linkSpeed" / "updateHost" / "requestStAuth") — and
+        // the section calls them through runActionFor(), so one implementation serves both.
         items.push({ kind: "testNetwork", icon: "📡", label: qsTr("Test Network") })
-        items.push({ kind: "rename",      icon: "✏️", label: qsTr("Rename") })
-        items.push({ kind: "delete",      icon: "🗑️", label: qsTr("Delete"), danger: true })
-        items.push({ kind: "background",  icon: "🎨", label: qsTr("Background") })
-        items.push({ kind: "viewDetails", icon: "ℹ️", label: qsTr("Details") })
-        // The link, by hand. Not the 4.6.0 tile that was removed: that one sent PREPARE and let
-        // the *host* pick a speed it had configured, which is the whole design the 8.1.0 pair
-        // undid. This asks for the same speed the launch would ask for, so it can only agree
-        // with it — either putting the link back now, or getting it ready so the next launch
-        // doesn't have to wait. Greyed with the reason when the host isn't offering the control.
-        //
-        // It takes the slot the Power tile had: X on this screen already opens the same power
-        // chooser, and the status-bar prompt is clickable, so the tile was a second door to one
-        // room.
-        // ⚠️ Two ways to be unable to do this, and only one of them used to grey the tile. The
-        // host refusing (allowsLinkControl) was covered; the *client's own* matching being off —
-        // globally or by the active profile — was not, so the tile looked live and LinkMatcher
-        // then declined in silence. Restoring is always sensible, so only the matching direction
-        // depends on the preference.
-        if (h.online && h.paired && h.auth === "authorized") {
-            var restoring = h.linkSwitched === true
-            // ⚠️ The session clause applies to the matching direction only. A restore asked for
-            // during a live stream is not refused — the host schedules it and puts the link back
-            // once the stream is done — so grey that one and the tile would be lying the other
-            // way. Last in the chain because "matching is off" is the actionable reason when
-            // both are true, while this one clears itself.
-            var why = h.linkChanging          ? qsTr("changing")
-                    : !h.allowsLinkControl    ? qsTr("host declined")
-                    : (!restoring && !h.matchLink) ? qsTr("matching is off")
-                    : (!restoring && h.sessionActive) ? qsTr("host busy")
-                    : ""
-            items.push({ kind: "linkSpeed", icon: "🔀",
-                         label: restoring ? qsTr("Restore NIC Speed")
-                                          : qsTr("Match Link Speed"),
-                         disabled: why.length > 0,
-                         reason: why })
+        // PyroWave Test (7.0.0): only on a host that offers PyroWave at all. Greyed with the
+        // reason when it can't run; once run, the tile says when and what it found.
+        if (h.online && h.paired && h.pyroWaveTest > 0) {
+            var pwWhy = !SystemProperties.hasPyroWave ? qsTr("not on this device")
+                      : h.pyroWaveTest < 2           ? qsTr("host too old")
+                      : h.tailscaleActive            ? qsTr("local network only")
+                      : ""
+            var pwSaved = pwWhy.length ? ({}) : PyroWaveTest.savedResult(hostUuidAt(h.index))
+            // NEW only while the tile has nothing else to say under its name: the tile is too
+            // short for a reason or a note AND the badge.
+            items.push({ kind: "pyrowaveTest", icon: "〰️", label: qsTr("PyroWave Test"),
+                         since: (pwWhy.length || pwSaved.bitrateKbps) ? "" : "7.0.0",
+                         disabled: pwWhy.length > 0, reason: pwWhy,
+                         note: pwSaved.bitrateKbps ? qsTr("tested %1 · %2 Mbps").arg(pwSaved.testedDay)
+                                                                            .arg(Math.round(pwSaved.bitrateKbps / 1000))
+                                                   : "" })
         }
-        if (h.online && h.paired && h.auth === "authorized")
-            items.push({ kind: "updateHost", winMark: true, label: qsTr("Windows Update") })
-        if (h.online && h.paired && (h.auth === "pending" || h.auth === "denied"))
-            items.push({ kind: "requestStAuth", icon: "🔑", label: qsTr("Request Access") })
+        items.push({ kind: "viewDetails", icon: "ℹ️", label: qsTr("Details") })
+        items.push({ kind: "rename",      icon: "✏️", label: qsTr("Rename") })
+        // since: the release that rebuilt it, for the NEW badge on the tile (7.0.0).
+        items.push({ kind: "background",  icon: "🎨", label: qsTr("Background"), since: "7.0.0" })
+        // Last, so the destructive one is never where the cursor happens to land.
+        items.push({ kind: "delete",      icon: "🗑️", label: qsTr("Delete"), danger: true })
         return items
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     // Dialogs
     // ═════════════════════════════════════════════════════════════════════════
+
+    // The profile list (8.7.1, #53) — dropped from the card's profile badge.
+    ProfileListPopup {
+        id: profileListPopup
+        computerModel: homeScreen.computerModel
+    }
 
     // Options chooser — wide centred tile grid.
     HostOptionsDialog {
@@ -2239,17 +2744,22 @@ FocusScope {
         onClosed: navRoot.forceActiveFocus()
     }
 
-    // Per-host stage backdrop. Applied immediately rather than on Done, so the choice is
-    // judged against the actual stage instead of a swatch.
+    // Per-host stage backdrop, a side panel since 7.0.0. Every move is applied to the card at
+    // once — the card is the preview — and the panel puts it back itself unless A confirms.
     StageBackgroundDialog {
         id: stageBackgroundDialog
         property string pcUuid: ""
         readonly property int pcIndex: homeScreen.hostIndexOf(pcUuid)
-        onChosen: function(imagePath, seedColor) {
+        computerModel: homeScreen.computerModel
+        hostIndex: pcIndex
+        appShell: homeScreen.appShell
+        // Centred beside the card, in the part of the stage the card does not cover.
+        dockItem: hostStage
+        dockLeft: hostStage._cardW
+        onChosen: function(imagePath) {
             if (pcIndex < 0) return
-            homeScreen.computerModel.setHostStageBackground(pcIndex, imagePath, seedColor)
+            homeScreen.computerModel.setHostStageBackground(pcIndex, imagePath)
             currentImage = imagePath
-            currentSeed  = seedColor
         }
         // Applied as it moves, like the colour: the card behind the dialog is the preview.
         onOpacityChosen: function(percent) {
@@ -2265,6 +2775,13 @@ FocusScope {
     }
 
     PairDialog { id: pairDialog }
+
+    // PyroWave Test (7.0.0), from Options. The notice after "Use" is the shell's.
+    PyroWaveTestDialog {
+        id: pyroWaveTestDialog
+        notify: function(text) { if (homeScreen.appShell) homeScreen.appShell.notice(text) }
+        onClosed: navRoot.forceActiveFocus()
+    }
 
     NavigableMessageDialog {
         id: deletePcDialog
@@ -2341,6 +2858,8 @@ FocusScope {
             }
 
             Label {
+                // Plain text: a name from the host, never markup (8.5.0, security review).
+                textFormat: Text.PlainText
                 text: renamePcDialog.label
                 font.family: Theme.family
                 font.pixelSize: renamePcDialog._px(Theme.fontTitle)
@@ -2373,7 +2892,7 @@ FocusScope {
                 maximumLength: 15
                 color: Theme.text
                 selectionColor: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.30)
-                selectedTextColor: Theme.onAccent
+                selectedTextColor: Theme.text
                 font.family: Theme.family
                 font.pixelSize: renamePcDialog._px(Theme.fontTitle)
                 font.bold: true
@@ -2383,16 +2902,33 @@ FocusScope {
                 background: Rectangle {
                     color: Theme.ground
                     radius: renamePcDialog._px(8)
-                    border.color: editText.activeFocus ? Theme.accent : Theme.line
+                    border.color: editText.activeFocus ? Theme.ink : Theme.line
                     border.width: editText.activeFocus ? 2 : 1
                 }
 
-                Keys.onReturnPressed: renamePcDialog.accept()
-                Keys.onEnterPressed:  renamePcDialog.accept()
+                // The pad's A opens the on-screen keyboard (8.0.0); Enter on a keyboard accepts.
+                Keys.onReturnPressed: function(event) { if (!renameKeyboard.offer(event)) renamePcDialog.accept() }
+                Keys.onEnterPressed:  function(event) { if (!renameKeyboard.offer(event)) renamePcDialog.accept() }
+                Keys.onSpacePressed:  function(event) { event.accepted = renameKeyboard.offer(event) }
             }
+        }
+
+        VirtualKeyboard {
+            id: renameKeyboard
+            target: editText
+            mode: "text"
+            onAccepted: { close(); renamePcDialog.accept() }
         }
     }
 
+    // Wake-on-LAN: a second MAC (8.1.0, issue #45) — see WakeMacDialog.qml.
+    WakeMacDialog {
+        id: wakeMacDialog
+        property string pcUuid: ""
+        model: computerModel
+        pcIndex: homeScreen.hostIndexOf(pcUuid)
+        onClosed: navRoot.forceActiveFocus()
+    }
     NavigableMessageDialog {
         id: showPcDetailsDialog
         headerText: qsTr("HOST DETAILS")
@@ -2439,6 +2975,15 @@ FocusScope {
         pcIndex: homeScreen.hostIndexOf(pcUuid)
         onClosed: navRoot.forceActiveFocus()
         onConfirmed: function(hostMode, hostUpdates, clientMode, clientUpdates) {
+            // 8.5.1, issue #51: remember the choice for this host, before anything is sent. A
+            // row that had nothing to offer (no access, no modes) keeps what was remembered.
+            if (!powerDialog.clientOnly && powerDialog.pcUuid !== "") {
+                var prev = homeScreen.computerModel.hostPowerChoice(powerDialog.pcUuid)
+                homeScreen.computerModel.setHostPowerChoice(powerDialog.pcUuid,
+                    powerDialog.hostChoiceMade   ? hostMode   : (prev.host   !== "" ? prev.host   : "keep"),
+                    powerDialog.clientChoiceMade ? clientMode : (prev.client !== "" ? prev.client : "shutdown"))
+            }
+
             if (hostMode === "keep") {
                 if (clientMode !== "keep")
                     SystemProperties.powerClient(clientMode, clientUpdates)
@@ -2456,7 +3001,7 @@ FocusScope {
             if (powerDialog.hostCaps === "legacy") {
                 // StreamTweak older than 8.6.0: the old SHUTDOWN, fire-and-forget, so this
                 // device waits a moment for the bridge socket to finish writing it.
-                homeScreen.computerModel.shutdownHost(powerDialog.pcIndex, hostUpdates)
+                homeScreen.computerModel.shutdownHost(powerDialog.pcIndex)
                 if (clientMode !== "keep")
                     clientPowerTimer.restart()
                 return

@@ -5,6 +5,10 @@ import QtQuick.Controls 2.5
 Dialog {
     id: navDialog
 
+    // 7.0.0: the shared spring in and quick out (PopEnter/PopExit), off with Reduce animations.
+    enter: PopEnter {}
+    exit: PopExit {}
+
     modal: true
     anchors.centerIn: Overlay.overlay
 
@@ -61,11 +65,13 @@ Dialog {
             readonly property bool isAffirmative: role === DialogButtonBox.AcceptRole
                                                   || role === DialogButtonBox.YesRole
             readonly property bool isDanger: isAffirmative && navDialog.affirmativeIsDanger
-            readonly property color accentBase:  isDanger ? Theme.danger : Theme.accent
-            // The tint derived from the same colour as the border and the label. The danger
-            // one used to be a literal — #EF4444 at 20% — under a Theme.danger (#F87171)
-            // border: two reds on one button.
-            readonly property color accentHover: Qt.rgba(accentBase.r, accentBase.g, accentBase.b, 0.20)
+            readonly property color accentBase:  isDanger ? Theme.danger : Theme.inkText
+            // The focus's colour: the fill and border of every focused button (05/11/2026).
+            readonly property color _hue: isDanger ? Theme.danger : Theme.accentFill
+            // The tint derived from the same colour as the border. The danger one used to be a
+            // literal — #EF4444 at 20% — under a Theme.danger (#F87171) border: two reds on one
+            // button.
+            readonly property color accentHover: Qt.rgba(_hue.r, _hue.g, _hue.b, 0.22)
 
             Keys.onReturnPressed: clicked()
             Keys.onEnterPressed:  clicked()
@@ -80,12 +86,14 @@ Dialog {
                 // for FOCUS only — matching the app-wide "green border = focused" rule.
                 // Unfocused buttons are flat with a grey border; the affirmative role is
                 // shown via text colour, so it no longer looks focused at rest.
+                //
+                // Glass since 05/11/2026 (variant A of docs/mockups/pulsanti), as DialogButton:
+                // a wash at 8% under Theme.lineHigh, 15% under the pointer, and focused the wash
+                // tinted 22% under a 2 px border. It stood on a solid Theme.card.
                 color: btn.activeFocus ? btn.accentHover
-                     : btn.hovered     ? Qt.rgba(1, 1, 1, 0.05)
-                     :                   Theme.card
-                border.color: btn.activeFocus ? btn.accentBase
-                            : btn.hovered     ? Theme.lineHigh
-                            :                   Theme.line
+                     : btn.hovered     ? Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.15)
+                     :                   Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
+                border.color: btn.activeFocus ? btn._hue : Theme.lineHigh
                 border.width: btn.activeFocus ? 2 : 1
             }
             contentItem: Label {
@@ -107,11 +115,35 @@ Dialog {
         }
     }
 
-    onClosed: {
-        // Restore focus to the stack so gamepad / keyboard navigation keeps
-        // working after the dialog disappears.
-        if (typeof stackView !== "undefined" && stackView) {
-            stackView.forceActiveFocus()
+    /*
+     * The focus goes back to where it was when the dialog opened (8.0.0), and only failing that
+     * to the stack. It used to go to the stack always: a confirmation opened over another popup
+     * (Remove profile in Host profiles) handed the focus to the page BEHIND that popup, and the
+     * D-pad drove Home while the profile dialog stayed on screen — B on the page went back, or
+     * offered to quit.
+     *
+     * Connections and not onAboutToShow / onClosed: an instance that writes its own onClosed
+     * (HomeScreen's dialogs, the profile confirmation) replaces a handler declared here, and
+     * the restore must run for every one of them. A beat later (callLater), after Qt's own
+     * focus hand-over at the end of the exit.
+     */
+    property Item _focusBefore: null
+    // False for an instance that places the focus itself on closing (the profile confirmation:
+    // the chip the focus came from may have just been removed).
+    property bool restoreFocus: true
+    Connections {
+        target: navDialog
+        function onAboutToShow() {
+            navDialog._focusBefore = (typeof window !== "undefined" && window) ? window.activeFocusItem : null
+        }
+        function onClosed() {
+            if (!navDialog.restoreFocus) return
+            var f = navDialog._focusBefore
+            navDialog._focusBefore = null
+            Qt.callLater(function() {
+                if (f && f.visible && f.enabled) f.forceActiveFocus()
+                else if (typeof stackView !== "undefined" && stackView) stackView.forceActiveFocus()
+            })
         }
     }
 }

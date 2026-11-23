@@ -50,9 +50,9 @@ public:
     explicit StreamTweakBridge(QObject* parent = nullptr);
     ~StreamTweakBridge() override;
 
-    // installUpdates: send SHUTDOWN_UPDATE ("Update and shut down") instead of SHUTDOWN.
-    // Kept for hosts older than StreamTweak 8.6.0, which do not know POWER.
-    void sendShutdown(const QString& hostAddress, bool installUpdates = false);
+    // SHUTDOWN, kept for hosts older than StreamTweak 8.6.0, which do not know POWER.
+    // (No SHUTDOWN_UPDATE since 8.8.4: it never installed the updates we report, §120.)
+    void sendShutdown(const QString& hostAddress);
 
     /**
      * Host power modes (StreamTweak 8.6.0+).
@@ -119,6 +119,9 @@ public:
      *    know why we opened it. Fire-and-forget.
      */
     void requestLockState(const QString& hostAddress, ResponseCallback onResult);
+    // GAMEALIVE (StreamTweak 9.2.3+): {v,known,game,running} — whether the last game the host
+    // launched still has a process running. Older hosts answer ERR or nothing.
+    void requestGameAlive(const QString& hostAddress, ResponseCallback onResult);
     void sendUnlockBegin(const QString& hostAddress);
     void sendUnlockEnd(const QString& hostAddress);
 
@@ -175,6 +178,19 @@ public:
      * error/timeout / StreamTweak unreachable.
      */
     void requestTailscale(const QString& hostAddress, ResponseCallback onResult);
+
+    /**
+     * StreamLight 8.0's host section (StreamTweak 10.0.0), both authenticated.
+     *
+     *  - requestHostSection: one of the reads — DASHBOARD, APPS, NVIDIA, or STATS for the
+     *    Dashboard's numbers. A JSON line, or "" / "ERR" on a host older than 10.0.0.
+     *  - sendHostSetting: one of the writes, already validated by the caller —
+     *    "SETAUDIO ON|OFF", "SETAPP <16 hex> ON|OFF", "SETSENTINEL ON|OFF". Replies OK,
+     *    ERR_NO_MANAGEMENT (this device lacks Host management), ERR_UNKNOWN_APP,
+     *    ERR_NO_PROFILE, ERR_UNSUPPORTED, ERR, or "" on timeout.
+     */
+    void requestHostSection(const QString& hostAddress, const QString& verb, ResponseCallback onResult);
+    void sendHostSetting(const QString& hostAddress, const QString& command, ResponseCallback onResult);
 
     /**
      * Queries the host's bridge capabilities (unauthenticated). Invokes onResult

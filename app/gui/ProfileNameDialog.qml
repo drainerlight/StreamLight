@@ -16,9 +16,12 @@ import QtQuick.Layouts 1.3
  * thing in the dialog, and above it are eight names chosen with the D-pad. A pad can now name
  * a profile; a keyboard can still call it whatever it likes.
  *
+ * 8.0.0: and now a pad can type too — reaching the field (or A on it) opens the on-screen
+ * keyboard, VirtualKeyboard.qml, whose Done applies the name.
+ *
  * ⚠️ The presets are situations, not picture qualities: "Docked", "TV", "Handheld". A profile
  * is chosen by where you are, and that is what the name has to say from the host card, where
- * it is the only word on screen. Keep them inside HostProfilesDialog._maxNameLen (14).
+ * it is the only word on screen. Keep them inside HostProfilesDialog._maxNameLen (20).
  *
  * D-pad: the grid is ONE focusable element with a cursor of its own, like the profile chips —
  * eight separate focus stops would take eight D-pad presses to cross and would need their
@@ -27,14 +30,28 @@ import QtQuick.Layouts 1.3
 Popup {
     id: pop
 
+    // 7.0.0: the shared spring in and quick out (PopEnter/PopExit), off with Reduce animations.
+    enter: PopEnter {}
+    exit: PopExit {}
+
     signal accepted(string outName)
 
     property string initName: ""
-    property int    maxLength: 14
+    property int    maxLength: 20
 
     readonly property var _presets: ["Docked", "Portable", "Handheld", "TV",
                                      "Living room", "Desk", "4K", "1080p"]
     readonly property int _cols: 4
+    // Every chip as wide as the widest name (8.0.0): sized each to its own word, the two rows of
+    // four had columns of different widths and nothing lined up under anything.
+    TextMetrics {
+        id: widestName
+        font.family: Theme.family
+        font.pixelSize: pop._px(Theme.fontSmall)
+        font.bold: true
+        text: { var w = ""; for (var i = 0; i < pop._presets.length; i++) if (pop._presets[i].length > w.length) w = pop._presets[i]; return w }
+    }
+    readonly property int _chipW: Math.ceil(widestName.advanceWidth) + _px(40)
 
     // The shared dialog scale — see SettingsResetDialog for why a dialog cannot take this
     // from the page behind it.
@@ -49,6 +66,10 @@ Popup {
     focus: true
     // Centred but offset higher, like the other entry popups: on a handheld a virtual
     // keyboard takes the bottom of the screen.
+    // Placed in the window, not in whatever opened it (7.0.0): x and y are worked out on the
+    // overlay, and a popup positions itself in its PARENT's coordinates — opened from inside
+    // a dialog, it landed off to the right by the dialog's own offset.
+    parent: Overlay.overlay
     x: (Overlay.overlay ? (Overlay.overlay.width - width) / 2 : 0)
     y: (Overlay.overlay ? Math.max(pop._px(40), Overlay.overlay.height * 0.12) : pop._px(40))
     closePolicy: Popup.CloseOnEscape
@@ -56,7 +77,7 @@ Popup {
 
     background: Rectangle {
         color: Theme.card
-        border.color: Theme.line
+        border.color: Theme.lineHigh // 7.0.0: no scrim, so the edge has to separate it from the card below
         border.width: 1
         radius: pop._px(12)
     }
@@ -110,21 +131,25 @@ Popup {
                     model: pop._presets
                     delegate: Rectangle {
                         id: chip
-                        width: chipLabel.implicitWidth + pop._px(34)
+                        width: pop._chipW
                         height: pop._px(42)
                         radius: pop._px(8)
                         readonly property bool _cursor: nameGrid.activeFocus
                                                         && nameGrid.cursor === index
                         readonly property bool _isCurrent: modelData === pop.initName
-                        color: Qt.tint(Theme.card, Qt.rgba(Theme.accent.r, Theme.accent.g,
-                                                           Theme.accent.b, 0.07))
-                        border.color: chip._cursor ? Theme.accent : Theme.line
-                        border.width: chip._cursor ? 3 : 1
+                        // Glass (05/11/2026, variant A of docs/mockups/pulsanti): the cursor is the
+                        // wash tinted by the accent under a 2 px accent border; the current name
+                        // a raised neutral wash inside.
+                        color: chip._cursor ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.22)
+                                            : Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
+                        border.color: chip._cursor ? Theme.accentFill : Theme.lineHigh
+                        border.width: chip._cursor ? 2 : 1
 
                         Rectangle {
                             anchors.fill: parent; anchors.margins: pop._px(3)
                             radius: pop._px(5)
-                            color: chip._isCurrent ? Theme.cardHigh : "transparent"
+                            color: chip._isCurrent ? Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.10)
+                                                   : "transparent"
                             border.color: Theme.lineHigh
                             border.width: chip._isCurrent ? 1 : 0
                         }
@@ -195,21 +220,24 @@ Popup {
                 maximumLength: pop.maxLength
                 color: Theme.text
                 selectionColor: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.30)
-                selectedTextColor: Theme.onAccent
+                selectedTextColor: Theme.text
                 font.family: Theme.family
                 font.pixelSize: pop._px(Theme.fontBody)
                 selectByMouse: true
                 background: Rectangle {
                     color: Theme.ground
                     radius: pop._px(8)
-                    border.color: nameField.activeFocus ? Theme.accent : Theme.line
+                    border.color: nameField.activeFocus ? Theme.ink : Theme.line
                     border.width: nameField.activeFocus ? 2 : 1
                 }
-                Keys.onReturnPressed: pop._commit(nameField.text)
-                Keys.onEnterPressed:  pop._commit(nameField.text)
+                // The pad's A opens the on-screen keyboard (8.0.0); Enter on a keyboard applies.
+                Keys.onReturnPressed: function(event) { if (!nameKeyboard.offer(event)) pop._commit(nameField.text) }
+                Keys.onEnterPressed:  function(event) { if (!nameKeyboard.offer(event)) pop._commit(nameField.text) }
+                Keys.onSpacePressed:  function(event) { event.accepted = nameKeyboard.offer(event) }
                 Keys.onUpPressed:     nameGrid.forceActiveFocus()
                 Keys.onDownPressed:   applyBtn.forceActiveFocus()
-                Keys.onTabPressed:    applyBtn.forceActiveFocus()
+                // Shift+Tab (the pad's up in Settings arrives as Tab + Shift) goes back up, like Up.
+                Keys.onTabPressed:    function(event) { if ((event.modifiers & Qt.ShiftModifier)) nameGrid.forceActiveFocus(); else applyBtn.forceActiveFocus() }
             }
             Label {
                 text: qsTr("or type one")
@@ -242,6 +270,14 @@ Popup {
                 KeyNavigation.left: applyBtn
             }
         }
+    }
+
+    // 8.0.0: with a pad, the field types through the on-screen keyboard; Done applies.
+    VirtualKeyboard {
+        id: nameKeyboard
+        target: nameField
+        mode: "text"
+        onAccepted: { close(); pop._commit(nameField.text) }
     }
 
     onOpened: {

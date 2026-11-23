@@ -15,6 +15,10 @@ import Theme 1.0
 Popup {
     id: dlg
 
+    // 7.0.0: the shared spring in and quick out (PopEnter/PopExit), off with Reduce animations.
+    enter: PopEnter {}
+    exit: PopExit {}
+
     // The shared dialog measurements, all of them multiplied by the window scale — see
     // Theme.uiScale for why a dialog cannot take this from the page it is covering.
     readonly property real _u: Theme.uiScale
@@ -79,7 +83,7 @@ Popup {
             // ⚠️ Three, not two. The third is the one that reads as a fault — everything works
             // and the bridge just stays silent, because a freshly discovered host record starts
             // with the integration off (nvcomputer.cpp), like any new host.
-            text: qsTr("This version starts from scratch:\n\n1.  Pair your hosts again\n2.  If you use StreamTweak, approve this device on the host\n3.  Switch the integration back on for each host, in Settings")
+            text: qsTr("This version starts from scratch:\n\n1.  Pair your hosts again\n2.  If you use StreamTweak, approve this device on the host\n3.  Switch StreamTweak back on for each host, from its card: StreamTweak, then Setup")
             font.family: Theme.family; font.pixelSize: dlg._px(Theme.fontBody)
             color: Theme.text2
             wrapMode: Text.WordWrap

@@ -8,6 +8,8 @@ import ComputerManager 1.0
 import StreamingPreferences 1.0
 import SystemProperties 1.0
 import SdlGamepadKeyNavigation 1.0
+import SignInLaunch 1.0
+import WindowChrome 1.0
 
 ApplicationWindow {
     property bool pollingActive: false
@@ -147,6 +149,13 @@ ApplicationWindow {
                 window.showFullScreen()
             })
         }
+
+        // 8.6.1 (#52): then look that the window really is back as it was, and put it back if
+        // not. On a handheld the rebuild above leaves a normal-state rect sized for Windows' own
+        // caption, which this app's frameless window turns into a shifted page if the window
+        // ever stays there — see WindowChrome::settle. Every mode, not only full screen: the
+        // report says maximized too.
+        WindowChrome.settle(_preStreamVisibility)
     }
 
     id: window
@@ -200,16 +209,21 @@ ApplicationWindow {
      * overrides, which is why overriding the backgrounds did not cover it.
      */
     function applyAccentToMaterial() {
-        Material.accent = Theme.accent
-        Material.primary = Theme.accent
+        // ink, not accent (7.0.0): what Material paints with it — the tab underline, switches,
+        // sliders — are lines on a card, and in Light the raw accent can vanish on white.
+        Material.accent = Theme.ink
+        Material.primary = Theme.ink
+        Material.theme = Theme.light ? Material.Light : Material.Dark
+        Material.background = Theme.ground
+        // 8.3.0 (#48): what Windows still draws of the frame — the border, the window menu —
+        // follows the app's theme instead of Windows'.
+        Qt.styleHints.colorScheme = Theme.light ? Qt.ColorScheme.Light : Qt.ColorScheme.Dark
     }
 
     // This function runs prior to creation of the initial StackView item
     function doEarlyInit() {
-        // Force dark background on all Qt versions for the new design
-        Material.background = Theme.ground
-
-        Material.theme = Material.Dark
+        // Background and Dark/Light are set with the accent now (7.0.0), so that a theme
+        // change reaches Material through the same one place.
         window.applyAccentToMaterial()
 
         SdlGamepadKeyNavigation.enable()
@@ -222,7 +236,13 @@ ApplicationWindow {
         function onChanged() { window.applyAccentToMaterial() }
     }
 
+    // Minimize, maximize and close on the app's floor, with no title bar under them (8.3.0, #48).
+    CaptionButtons { }
+
     Component.onCompleted: {
+        // Before the window is shown: from here on Windows' caption belongs to the page.
+        WindowChrome.attach(window)
+
         // Honor the GUI mode preference (default on first launch: maximised).
         if (SystemProperties.hasDesktopEnvironment) {
             if (StreamingPreferences.uiDisplayMode === StreamingPreferences.UI_MAXIMIZED) {
@@ -286,6 +306,45 @@ ApplicationWindow {
         anchors.fill: parent
         focus: true
 
+        // ── Transitions (7.0.0) ──────────────────────────────────────────────
+        // Above AppShell this stack only ever holds the curtains — launch, quit, the CLI ones —
+        // and they make their own entrance: the page underneath fades to black, then the curtain
+        // rises out of it. A push therefore only keeps that page up for as long as the curtain
+        // asks. ⚠️ Read from this property and not from currentItem: the curtain sets it when it
+        // is CREATED, i.e. before the push, so nothing depends on whether the StackView has
+        // switched currentItem by the time the transition starts.
+        property int entranceHoldMs: 0
+
+        pushEnter: Transition {}
+        pushExit: Transition {
+            PauseAnimation { duration: stackView.entranceHoldMs }
+        }
+        // Leaving a curtain fades it away over the page it returns to.
+        popEnter: Transition {}
+        popExit: Transition {
+            NumberAnimation {
+                property: "opacity"; from: 1; to: 0
+                duration: Theme.reduceAnimations ? 0 : 450
+                easing.type: Easing.OutCubic
+            }
+        }
+        // One curtain replacing another — a retry, new settings, the next game after a quit —
+        // cross-fades in place.
+        replaceEnter: Transition {
+            NumberAnimation {
+                property: "opacity"; from: 0; to: 1
+                duration: Theme.reduceAnimations ? 0 : 350
+                easing.type: Easing.OutCubic
+            }
+        }
+        replaceExit: Transition {
+            NumberAnimation {
+                property: "opacity"; from: 1; to: 0
+                duration: Theme.reduceAnimations ? 0 : 350
+                easing.type: Easing.OutCubic
+            }
+        }
+
         Component.onCompleted: {
             // Perform our early initialization before constructing the
             // initial view and pushing it to the StackView.
@@ -323,10 +382,9 @@ ApplicationWindow {
             }
         }
 
-        Keys.onMenuPressed: {
-            var item = stackView.currentItem
-            if (item && item.openSettings) item.openSettings()
-        }
+        // ⚠️ No Keys.onMenuPressed (8.0.0). Moonlight opened Settings on an X nobody took, so X
+        // opened Settings wherever a page has no use for it (the StreamTweak section) and no
+        // prompt said so. Settings is Y, below — the one the status bar prints.
 
         // This is a keypress we've reserved for letting the
         // SdlGamepadKeyNavigation object tell us to show settings
@@ -368,7 +426,7 @@ ApplicationWindow {
             inactivityTimer.stop()
 
             // Restart polling if it was stopped
-            if (!pollingActive) {
+            if (!pollingActive && !SignInLaunch.holding) {
                 ComputerManager.startPolling()
                 pollingActive = true
             }
@@ -378,13 +436,25 @@ ApplicationWindow {
         SdlGamepadKeyNavigation.notifyWindowFocus(visible && active)
     }
 
+    // 8.2.0: started at sign-in, polling waits for the user to pick StreamLight — a host whose
+    // NIC wakes on any directed packet would otherwise be woken for someone going to the desktop.
+    Connections {
+        target: SignInLaunch
+        function onHoldingChanged() {
+            if (!SignInLaunch.holding && window.visible && window.active && !window.pollingActive) {
+                ComputerManager.startPolling()
+                window.pollingActive = true
+            }
+        }
+    }
+
     onActiveChanged: {
         if (active) {
             // Stop the inactivity timer
             inactivityTimer.stop()
 
             // Restart polling if it was stopped
-            if (!pollingActive) {
+            if (!pollingActive && !SignInLaunch.holding) {
                 ComputerManager.startPolling()
                 pollingActive = true
             }
@@ -408,8 +478,10 @@ ApplicationWindow {
         }
     }
 
+    // sequences, not sequence: since Qt 6.12 New and HelpContents carry a second binding (the
+    // dedicated New and Help keys), and sequence binds only the first and warns about the rest.
     Shortcut {
-        sequence: StandardKey.New
+        sequences: [ StandardKey.New ]
         onActivated: {
             var item = stackView.currentItem
             if (item && item.openAddPc) item.openAddPc()
@@ -417,7 +489,7 @@ ApplicationWindow {
     }
 
     Shortcut {
-        sequence: StandardKey.HelpContents
+        sequences: [ StandardKey.HelpContents ]
         enabled: SystemProperties.hasBrowser
         onActivated: Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide")
     }

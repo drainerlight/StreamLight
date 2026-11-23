@@ -3,19 +3,40 @@
 #include "backend/linkspeed.h"
 #include "backend/linkmatcher.h"
 #include "../TailscaleManager.h"
+#include "backend/huesyncclient.h"
 #include "settings/appsettings.h"
 #include "settings/playtime.h"
 #include "settings/streamingpreferences.h"
+#include "settings/theme.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRandomGenerator>
+#include <QRegularExpression>
+#include <QFileInfo>
+#include <QDateTime>
 #include <QSettings>
+#include <QSysInfo>
 #include <QThreadPool>
+#include <QTimer>
+#include <QUrl>
 
 ComputerModel::ComputerModel(QObject* object)
-    : QAbstractListModel(object) {}
+    : QAbstractListModel(object)
+{
+    m_LibraryJobTimer.setInterval(2000);
+    connect(&m_LibraryJobTimer, &QTimer::timeout, this, &ComputerModel::pollLibraryJobs);
+    m_HueWatchTimer.setInterval(20000);
+    connect(&m_HueWatchTimer, &QTimer::timeout, this, &ComputerModel::watchHueLights);
+    m_HueWatchTimer.start();
+    connect(&m_BoxArtManager, &BoxArtManager::boxArtLoadComplete, this,
+            [this](NvComputer* computer, NvApp, QUrl) {
+                int index = m_Computers.indexOf(computer);
+                if (index >= 0)
+                    emit libraryCoverReady(index);
+            });
+}
 
 void ComputerModel::initialize(ComputerManager* computerManager)
 {
@@ -27,6 +48,18 @@ void ComputerModel::initialize(ComputerManager* computerManager)
 
     m_Computers = m_ComputerManager->getComputers();
     bumpLayoutRevision();
+
+    // Each theme has its own picture per host (13/10/2026): when the theme in force flips,
+    // every card has to fetch the other one.
+    m_StageLight = Theme::get()->light();
+    connect(Theme::get(), &Theme::changed, this, [this]() {
+        const bool l = Theme::get()->light();
+        if (l == m_StageLight) return;
+        m_StageLight = l;
+        if (!m_Computers.isEmpty()) {
+            emit dataChanged(createIndex(0, 0), createIndex(m_Computers.count() - 1, 0), { StageImageRole });
+        }
+    });
 }
 
 void ComputerModel::bumpLayoutRevision()
@@ -78,7 +111,7 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
     case BusyRole:
         return computer->currentGameId != 0;
     case WakeableRole:
-        return !computer->macAddress.isEmpty();
+        return !computer->macAddress.isEmpty() || !computer->wakeMacAddress.isEmpty();
     case StatusUnknownRole:
         return computer->state == NvComputer::CS_UNKNOWN;
     case ServerSupportedRole:
@@ -121,14 +154,10 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         int a = HostProfileManager::get()->active(computer->uuid);
         return a >= 0 ? HostProfileManager::get()->name(computer->uuid, a) : QString();
     }
-    case StageColorFromRole:
-        return computer->stageColorFrom;
-    case StageColorToRole:
-        return computer->stageColorTo;
     case StageImageRole:
-        return computer->stageImagePath;
-    case StageSeedRole:
-        return computer->stageSeedColor;
+        // The theme in force's picture; Light falls back to Dark's until it has one of its own.
+        return Theme::get()->light() && computer->stageImageLightSet ? computer->stageImagePathLight
+                                                                     : computer->stageImagePath;
     case StageOpacityRole:
         // 0 is "never set" — every host saved before 6.0.0 — and reads as the default.
         // Clamped on the way out as well as on the way in: the floor has already moved once
@@ -140,6 +169,14 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return computer->streamTweakEnabled;
     case AsleepRole:
         return computer->heldAsleep;
+    case PyroWaveTestRole:
+        return !(computer->serverCodecModeSupport & SCM_PYROWAVE) ? 0 : computer->pyrowaveTestable ? 2 : 1;
+    case ServerRestartRole: {
+        auto job = m_LibraryJobs.constFind(computer->uuid);
+        if (job == m_LibraryJobs.constEnd()) return QString();
+        static const QStringList kDown = { QStringLiteral("stopping"), QStringLiteral("starting"), QStringLiteral("waiting") };
+        return kDown.contains(job->phase) ? (job->server.isEmpty() ? tr("the streaming server") : job->server) : QString();
+    }
     case DetailsRole: {
         QString state, pairState;
 
@@ -176,6 +213,8 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
                tr("IPv6 Address: %1").arg(computer->ipv6Address.toString()) + '\n' +
                tr("Manual Address: %1").arg(computer->manualAddress.toString()) + '\n' +
                tr("MAC Address: %1").arg(computer->macAddress.isEmpty() ? tr("Unknown") : QString(computer->macAddress.toHex(':'))) + '\n' +
+               (computer->wakeMacAddress.isEmpty() ? QString()
+                    : tr("Also wakes with: %1").arg(QString(computer->wakeMacAddress.toHex(':'))) + '\n') +
                tr("Pair State: %1").arg(pairState) + '\n' +
                tr("Running Game ID: %1").arg(computer->state == NvComputer::CS_ONLINE ? QString::number(computer->currentGameId) : tr("Unknown")) + '\n' +
                tr("HTTPS Port: %1").arg(computer->state == NvComputer::CS_ONLINE ? QString::number(computer->activeHttpsPort) : tr("Unknown"));
@@ -218,13 +257,12 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
     names[ProfileCountRole] = "profileCount";
     names[ActiveProfileSlotRole] = "activeProfileSlot";
     names[ActiveProfileNameRole] = "activeProfileName";
-    names[StageColorFromRole] = "stageColorFrom";
-    names[StageColorToRole] = "stageColorTo";
     names[StageImageRole] = "stageImage";
-    names[StageSeedRole] = "stageSeed";
     names[StageOpacityRole] = "stageOpacity";
     names[StreamTweakEnabledRole] = "streamTweakEnabled";
     names[AsleepRole] = "asleep";
+    names[PyroWaveTestRole] = "pyroWaveTest";
+    names[ServerRestartRole] = "serverRestart";
 
     return names;
 }
@@ -457,6 +495,14 @@ void ComputerModel::requestHostNetInfo(int computerIndex)
     m_streamTweakBridge.requestNetInfo(address, [this, uuid](const QString& reply) {
         const int computerIndex = indexOfUuid(uuid);
         if (computerIndex < 0) return;
+        if (reply.startsWith(QStringLiteral("ERR_UNAUTHORIZED"))) {
+            // 8.8.2: the same answer requestStreamTweakStatus() gives to a lost authorization.
+            // On a host that answers NETINFO the Home no longer asks STATUS as well, so the
+            // revocation has to be noticed here: hide the NIC line and ask the access state
+            // again, which brings the PIN and approval flow back.
+            emit streamTweakStatusReceived(computerIndex, QString());
+            reauthAfterRejection(computerIndex, uuid);
+        }
         QVariantMap out;
         if (!reply.isEmpty() && !reply.startsWith(QStringLiteral("ERR"))) {
             QJsonDocument doc = QJsonDocument::fromJson(reply.toUtf8());
@@ -482,6 +528,34 @@ void ComputerModel::requestHostNetInfo(int computerIndex)
     });
 }
 
+/*
+ * ⚠️ 8.8.3 (StreamTweak #17): the re-request of the access state after an ERR_UNAUTHORIZED is
+ * spaced out, at most once per host every kReauthGapMs.
+ *
+ * Unspaced, it closed a loop with no wait in it. ENROLL is not signed, so a host that has us
+ * approved answers ENROLLED even when it refuses every SIGNED command — a client clock more than
+ * 60 s off the host's is enough. "authorized" makes the Home ask NETINFO at once
+ * (onStreamTweakAuthReceived), NETINFO comes back ERR_UNAUTHORIZED, which asked the access state
+ * again, and so on: ~120 rounds a second on a OneXPlayer, 12,000 "Local link" lines in the client's
+ * log and ~500 refusals a second in StreamTweak's, enough to fill the bridge's connection slots.
+ * The loop came with 8.8.2, which taught requestHostNetInfo() to notice a revocation.
+ *
+ * A real revocation is still noticed at the first refusal: the gap only holds back the SECOND
+ * re-request. The cost is that a host refusing us while approving us is asked again twice a minute
+ * instead of 120 times a second.
+ */
+void ComputerModel::reauthAfterRejection(int computerIndex, const QString& uuid)
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const auto it = m_reauthAt.constFind(uuid);
+    if (it != m_reauthAt.constEnd() && now - it.value() >= 0 && now - it.value() < kReauthGapMs)
+        return;
+    m_reauthAt.insert(uuid, now);
+    qInfo() << "StreamTweak refused a signed command; asking the access state again"
+            << "(the host's log says why)";
+    requestStreamTweakAuth(computerIndex);
+}
+
 void ComputerModel::restoreHostLink(int computerIndex)
 {
     if (!bridgeAllowed(computerIndex)) return;   // see requestHostNetInfo()
@@ -500,8 +574,258 @@ void ComputerModel::restoreHostLink(int computerIndex)
     m_streamTweakBridge.sendRestore(address, [](const QString&) {});
 }
 
-void ComputerModel::setHostStageBackground(int computerIndex, const QString& imagePath,
-                                           const QString& seedColor)
+/*
+ * ⚠️ 8.5.0 (security review): every string the StreamTweak section shows comes from the host —
+ * game and app names, devices, Windows Update titles, Hue area names read from the bridge — and a
+ * QML Text left in its default AutoText reads a string that starts like a tag as markup: an <img>
+ * in a game's name would have made StreamLight fetch a picture from wherever it pointed. Here, at
+ * the one door all of the section's replies come through, every "<" becomes the look-alike "‹",
+ * which cannot open a tag. Ids are hex and covers base64: neither ever holds one.
+ */
+static QVariant neutraliseMarkup(const QVariant& value)
+{
+    switch (value.typeId()) {
+    case QMetaType::QString: {
+        QString text = value.toString();
+        if (text.contains(QLatin1Char('<')))
+            text.replace(QLatin1Char('<'), QChar(0x2039));
+        return text;
+    }
+    case QMetaType::QVariantMap: {
+        QVariantMap map = value.toMap();
+        for (auto it = map.begin(); it != map.end(); ++it)
+            it.value() = neutraliseMarkup(it.value());
+        return map;
+    }
+    case QMetaType::QVariantList: {
+        QVariantList list = value.toList();
+        for (QVariant& item : list)
+            item = neutraliseMarkup(item);
+        return list;
+    }
+    default:
+        return value;
+    }
+}
+
+void ComputerModel::requestHostSection(int computerIndex, const QString& verb)
+{
+    // The reads the host section knows. Anything else would go out as a command of its own.
+    static const QStringList kReads = { QStringLiteral("DASHBOARD"), QStringLiteral("APPS"),
+                                        QStringLiteral("NVIDIA"),    QStringLiteral("STATS"),
+                                        QStringLiteral("UPDATESTATE"), QStringLiteral("LIBRARY"),
+                                        // The Hue Sync tab (8.4.0, StreamTweak 10.1.0).
+                                        QStringLiteral("HUESYNC") };
+    // The Sessions tab's reads (8.0.0), in their only shapes: numbers, a hex session id and a
+    // fixed track name — never a game name or a path (the host upper-cases the line anyway).
+    static const QRegularExpression kSessionReads(QStringLiteral(
+        "^(SESSIONS \\d{1,5} \\d{1,3} (ALL|MINE)"
+        "|SESSION [0-9A-Fa-f]{6,32}"
+        "|SERIES [0-9A-Fa-f]{6,32} (HL|RTT|DROPS|BR|DEC|GPU|POWER|ENC|CPU|PLIMIT|TEMP|PCAP)"
+        "|COVER [0-9A-Fa-f]{6,32} \\d{1,2})$"));
+    if (!kReads.contains(verb) && !kSessionReads.match(verb).hasMatch()) return;
+
+    if (!bridgeAllowed(computerIndex)) {         // see requestHostNetInfo()
+        emit hostSectionReceived(computerIndex, verb, QVariantMap());
+        return;
+    }
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return;
+
+    NvComputer* computer = m_Computers[computerIndex];
+    QString address, uuid;
+    {
+        QReadLocker lock(&computer->lock);
+        address = computer->activeAddress.address();
+        uuid = computer->uuid;
+    }
+    if (address.isEmpty()) {
+        emit hostSectionReceived(computerIndex, verb, QVariantMap());
+        return;
+    }
+
+    m_streamTweakBridge.requestHostSection(address, verb, [this, uuid, verb](const QString& reply) {
+        const int computerIndex = indexOfUuid(uuid);   // see requestHostNetInfo()
+        if (computerIndex < 0) return;
+        QVariantMap data;
+        // "ERR" from a host older than 10.0.0, "STATS_UNAVAILABLE", or nothing on a timeout:
+        // all of them are "no answer", which the page shows as such rather than as zeros.
+        const QJsonDocument doc = QJsonDocument::fromJson(reply.toUtf8());
+        if (doc.isObject()) data = neutraliseMarkup(doc.object().toVariantMap()).toMap();
+        if (verb == QStringLiteral("LIBRARY") && !data.isEmpty()) noteLibraryState(uuid, data);
+        emit hostSectionReceived(computerIndex, verb, data);
+    });
+}
+
+void ComputerModel::setHostSetting(int computerIndex, const QString& command)
+{
+    // ⚠️ The shapes are fixed here, not only on the host: the host refuses anything else, and
+    // this is the second lock on the same door — a QML mistake cannot become a command.
+    static const QRegularExpression kWrite(QStringLiteral(
+        "^(SETAUDIO (ON|OFF)|SETSENTINEL (ON|OFF)|SETAPP [0-9A-F]{16} (ON|OFF)"
+        // Sync and restart (8.0.0, Library tab): no argument, so nothing to choose but the action.
+        "|LIBSYNC"
+        // One session out of the host's history (8.2.0, Sessions tab; StreamTweak 10.0.6).
+        "|DELETESESSION [0-9A-Fa-f]{6,32}"
+        // The Hue Sync tab (8.4.0, StreamTweak 10.1.0): pairing has no argument, the rules are
+        // two switches — no address, key or area ever goes on the wire.
+        "|HUEPAIR|SETHUE HOLD (ON|OFF)|SETHUE GIVEWAY (ANY|THIS))$"));
+    if (!kWrite.match(command).hasMatch()) {
+        emit hostSettingResult(computerIndex, command, QStringLiteral("ERR"));
+        return;
+    }
+    if (!bridgeAllowed(computerIndex)) {         // see requestHostNetInfo()
+        emit hostSettingResult(computerIndex, command, QString());
+        return;
+    }
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return;
+
+    NvComputer* computer = m_Computers[computerIndex];
+    QString address, uuid;
+    {
+        QReadLocker lock(&computer->lock);
+        address = computer->activeAddress.address();
+        uuid = computer->uuid;
+    }
+    if (address.isEmpty()) {
+        emit hostSettingResult(computerIndex, command, QString());
+        return;
+    }
+
+    m_streamTweakBridge.sendHostSetting(address, command, [this, uuid, command](const QString& reply) {
+        const int computerIndex = indexOfUuid(uuid);
+        if (computerIndex < 0) return;
+        qInfo() << "Host setting" << command << "→" << (reply.isEmpty() ? QStringLiteral("(no answer)") : reply);
+        if (command == QStringLiteral("LIBSYNC") && reply == QStringLiteral("OK")) {
+            // Followed from now on, wherever the user goes: see m_LibraryJobs.
+            m_LibraryJobs.insert(uuid, LibraryJob{ QString(), QStringLiteral("scanning"), QDateTime::currentMSecsSinceEpoch() });
+            if (!m_LibraryJobTimer.isActive()) m_LibraryJobTimer.start();
+        }
+        emit hostSettingResult(computerIndex, command, reply);
+    });
+}
+
+// ── Hue Sync (8.4.0) ────────────────────────────────────────────────────────
+
+bool ComputerModel::hueClientInstalled() const { return !HueSyncClient::executable().isEmpty(); }
+
+bool ComputerModel::hueClientRunning() const { return HueSyncClient::running(); }
+
+QString ComputerModel::thisDeviceName() const { return QSysInfo::machineHostName(); }
+
+void ComputerModel::hueTakeBack()
+{
+    // Off the GUI thread: closing Hue Sync waits for it to exit.
+    m_HueTakenBackMs = QDateTime::currentMSecsSinceEpoch();
+    QThreadPool::globalInstance()->start([this]() {
+        const bool ok = HueSyncClient::restart();
+        QMetaObject::invokeMethod(this, [this, ok]() { emit hueTakeBackDone(ok); }, Qt::QueuedConnection);
+    });
+}
+
+bool ComputerModel::hueAutoTakeBack(int computerIndex) const
+{
+    const QString uuid = uuidAt(computerIndex);
+    return !uuid.isEmpty() && QSettings().value(QStringLiteral("huesync/autoback/") + uuid, false).toBool();
+}
+
+void ComputerModel::setHueAutoTakeBack(int computerIndex, bool on)
+{
+    const QString uuid = uuidAt(computerIndex);
+    if (uuid.isEmpty()) return;
+    QSettings().setValue(QStringLiteral("huesync/autoback/") + uuid, on);
+}
+
+/*
+ * "Take them back by itself": while Hue Sync runs here, ask each host that has the option on who
+ * holds the bridge; if another device does, restart Hue Sync here once. A minute between two
+ * restarts, so two devices with the option on cannot pass the lights to and fro every 20 s.
+ */
+void ComputerModel::watchHueLights()
+{
+    if (QDateTime::currentMSecsSinceEpoch() - m_HueTakenBackMs < 60000) return;
+    bool any = false;
+    for (int i = 0; i < m_Computers.count() && !any; i++) any = hueAutoTakeBack(i);
+    if (!any || !HueSyncClient::running()) return;
+
+    const QString me = QSysInfo::machineHostName();
+    for (int i = 0; i < m_Computers.count(); i++) {
+        if (!hueAutoTakeBack(i) || !bridgeAllowed(i)) continue;
+        NvComputer* computer = m_Computers[i];
+        QString address;
+        {
+            QReadLocker lock(&computer->lock);
+            address = computer->activeAddress.address();
+        }
+        if (address.isEmpty()) continue;
+        m_streamTweakBridge.requestHostSection(address, QStringLiteral("HUESYNC"), [this, me](const QString& reply) {
+            const QJsonObject o = QJsonDocument::fromJson(reply.toUtf8()).object();
+            for (const QJsonValue& v : o.value(QStringLiteral("areas")).toArray()) {
+                const QJsonObject a = v.toObject();
+                const QString device = a.value(QStringLiteral("device")).toString();
+                if (!a.value(QStringLiteral("active")).toBool() || device.isEmpty()
+                        || device.compare(me, Qt::CaseInsensitive) == 0)
+                    continue;
+                if (QDateTime::currentMSecsSinceEpoch() - m_HueTakenBackMs < 60000) return;
+                qInfo() << "Hue Sync: the lights went to" << device << "— taking them back";
+                hueTakeBack();
+                return;
+            }
+        });
+    }
+}
+
+void ComputerModel::noteLibraryState(const QString& uuid, const QVariantMap& state)
+{
+    const QVariantMap job = state.value(QStringLiteral("job")).toMap();
+    const QString phase = job.value(QStringLiteral("phase")).toString();
+    static const QStringList kRunning = { QStringLiteral("scanning"), QStringLiteral("writing"), QStringLiteral("stopping"),
+                                          QStringLiteral("starting"), QStringLiteral("waiting") };
+    const int row = indexOfUuid(uuid);
+    const QString before = row >= 0 ? data(index(row), ServerRestartRole).toString() : QString();
+
+    if (kRunning.contains(phase)) {
+        LibraryJob& j = m_LibraryJobs[uuid];
+        if (j.sinceMs == 0) j.sinceMs = QDateTime::currentMSecsSinceEpoch();
+        j.phase = phase;
+        j.server = state.value(QStringLiteral("server")).toString();
+        if (!m_LibraryJobTimer.isActive()) m_LibraryJobTimer.start();
+    } else {
+        m_LibraryJobs.remove(uuid);
+        if (m_LibraryJobs.isEmpty()) m_LibraryJobTimer.stop();
+    }
+
+    if (row >= 0 && data(index(row), ServerRestartRole).toString() != before)
+        emit dataChanged(index(row), index(row), { ServerRestartRole });
+}
+
+void ComputerModel::pollLibraryJobs()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QStringList uuids = m_LibraryJobs.keys();
+    for (const QString& uuid : uuids) {
+        // A job the host stopped answering about: let it go after four minutes.
+        if (now - m_LibraryJobs.value(uuid).sinceMs > 4 * 60 * 1000) {
+            noteLibraryState(uuid, QVariantMap{ { QStringLiteral("job"), QVariantMap{ { QStringLiteral("phase"), QStringLiteral("failed") } } } });
+            continue;
+        }
+        const int row = indexOfUuid(uuid);
+        if (row < 0) { m_LibraryJobs.remove(uuid); continue; }
+        QString address;
+        {
+            QReadLocker lock(&m_Computers[row]->lock);
+            address = m_Computers[row]->activeAddress.address();
+        }
+        if (address.isEmpty()) continue;
+        // The bridge is not the streaming server: it answers right through the restart.
+        m_streamTweakBridge.requestHostSection(address, QStringLiteral("LIBRARY"), [this, uuid](const QString& reply) {
+            const QJsonDocument doc = QJsonDocument::fromJson(reply.toUtf8());
+            if (doc.isObject()) noteLibraryState(uuid, doc.object().toVariantMap());
+        });
+    }
+    if (m_LibraryJobs.isEmpty()) m_LibraryJobTimer.stop();
+}
+
+void ComputerModel::setHostStageBackground(int computerIndex, const QString& imagePath)
 {
     if (computerIndex < 0 || computerIndex >= m_Computers.count()) return;
 
@@ -513,12 +837,37 @@ void ComputerModel::setHostStageBackground(int computerIndex, const QString& ima
     }
     if (uuid.isEmpty()) return;
 
-    m_ComputerManager->setStageBackground(uuid, imagePath, seedColor);
+    // Into the theme in force: each keeps its own picture (13/10/2026).
+    m_ComputerManager->setStageBackground(uuid, imagePath, Theme::get()->light());
 
     // computerStateChanged only reaches the model on the next poll tick, and the user has
-    // just picked a colour — repaint now so the stage answers the click.
+    // just picked a picture — repaint now so the stage answers the click.
     QModelIndex idx = createIndex(computerIndex, 0);
-    emit dataChanged(idx, idx, { StageColorFromRole, StageColorToRole, StageImageRole, StageSeedRole });
+    emit dataChanged(idx, idx, { StageImageRole });
+}
+
+void ComputerModel::rememberStagePicture(const QString& imagePath)
+{
+    // Called on Apply only (7.0.0): the panel previews as the cursor moves, and a picture the
+    // user looked at and then cancelled must not push a real one out of the list.
+    if (!imagePath.isEmpty()) {
+        QSettings settings;
+        QStringList recent = settings.value(QStringLiteral("stage/recentPictures")).toStringList();
+        recent.removeAll(imagePath);
+        recent.prepend(imagePath);
+        while (recent.count() > 3) recent.removeLast();
+        settings.setValue(QStringLiteral("stage/recentPictures"), recent);
+    }
+}
+
+QStringList ComputerModel::recentStagePictures() const
+{
+    QSettings settings;
+    QStringList out;
+    for (const QString& p : settings.value(QStringLiteral("stage/recentPictures")).toStringList()) {
+        if (QFileInfo::exists(p)) out.append(p);
+    }
+    return out;
 }
 
 void ComputerModel::setHostStageOpacity(int computerIndex, int percent)
@@ -539,6 +888,53 @@ void ComputerModel::setHostStageOpacity(int computerIndex, int percent)
     // to follow it now rather than on the next poll tick.
     QModelIndex idx = createIndex(computerIndex, 0);
     emit dataChanged(idx, idx, { StageOpacityRole });
+}
+
+QVariantMap ComputerModel::hostWakeMacs(int computerIndex) const
+{
+    QVariantMap out;
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return out;
+
+    NvComputer* computer = m_Computers[computerIndex];
+    QReadLocker lock(&computer->lock);
+    out["reported"] = computer->macAddress.isEmpty() ? QString()
+                                                     : QString(computer->macAddress.toHex(':')).toUpper();
+    out["extra"] = computer->wakeMacAddress.isEmpty() ? QString()
+                                                      : QString(computer->wakeMacAddress.toHex(':')).toUpper();
+    return out;
+}
+
+bool ComputerModel::setHostWakeMac(int computerIndex, const QString& text)
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return false;
+
+    NvComputer* computer = m_Computers[computerIndex];
+    QString uuid;
+    {
+        QReadLocker lock(&computer->lock);
+        uuid = computer->uuid;
+    }
+    if (uuid.isEmpty()) return false;
+
+    QString digits = text.trimmed();
+    digits.remove(':').remove('-').remove('.').remove(' ');
+
+    QByteArray mac;
+    if (!digits.isEmpty()) {
+        static const QRegularExpression hex12(QStringLiteral("^[0-9A-Fa-f]{12}$"));
+        if (!hex12.match(digits).hasMatch()) return false;
+        mac = QByteArray::fromHex(digits.toLatin1());
+        // All zeros is what Sunshine reports when it has no MAC; the low bit of the first byte
+        // marks a group address, which no network card has.
+        if (mac == QByteArray(6, '\0') || (quint8(mac[0]) & 0x01)) return false;
+    }
+
+    if (!m_ComputerManager->setWakeMacAddress(uuid, mac)) return false;
+
+    // The Wake tile depends on it (WakeableRole): repaint now, not on the next poll.
+    QModelIndex idx = createIndex(computerIndex, 0);
+    emit dataChanged(idx, idx, { WakeableRole, DetailsRole });
+    return true;
 }
 
 bool ComputerModel::heldAsleep(int computerIndex) const
@@ -652,6 +1048,14 @@ void ComputerModel::refreshTailscale(int computerIndex)
             if (tailscaleIp.isEmpty() || tailscaleIp == QStringLiteral("NOT_DETECTED")) {
                 return;
             }
+            // ⚠️ 8.8.3 (StreamTweak #17): only an address is an answer. A refused command comes back
+            // as "ERR_UNAUTHORIZED", and that string used to be stored as the host's Tailscale
+            // address — saved with the host, shown on its card ("Tailscale  ERR_UNAUTHORIZED") and
+            // added to the addresses the poller tries. StreamTweak only ever sends an IP here.
+            if (QHostAddress(tailscaleIp.trimmed()).isNull()) {
+                qInfo() << "Ignoring a TAILSCALE reply that is not an address:" << tailscaleIp.left(40);
+                return;
+            }
             if (m_ComputerManager != nullptr) {
                 m_ComputerManager->setTailscaleAddress(uuid, tailscaleIp);
             }
@@ -721,7 +1125,7 @@ void ComputerModel::handleComputerStateChanged(NvComputer* computer)
     }
 }
 
-void ComputerModel::shutdownHost(int computerIndex, bool installUpdates)
+void ComputerModel::shutdownHost(int computerIndex)
 {
     // Powering off the CLIENT is not a StreamTweak feature and is not affected — that lives
     // in SystemProperties. Only the host half goes away.
@@ -737,7 +1141,7 @@ void ComputerModel::shutdownHost(int computerIndex, bool installUpdates)
     if (address.isEmpty())
         return;
 
-    m_streamTweakBridge.sendShutdown(address, installUpdates);
+    m_streamTweakBridge.sendShutdown(address);
 }
 
 void ComputerModel::requestPowerCaps(int computerIndex)
@@ -882,6 +1286,85 @@ void ComputerModel::requestLockState(int computerIndex)
             bool supported = response.contains(QLatin1String("\"locked\""));
             bool locked    = response.contains(QLatin1String("\"locked\":true"));
             emit lockStateReceived(computerIndex, supported, locked);
+        });
+}
+
+QVariantMap ComputerModel::hostPowerChoice(const QString& hostUuid) const
+{
+    const QStringList choice = PlaytimeManager::get()->powerChoiceOn(hostUuid);
+    QVariantMap out;
+    out[QStringLiteral("host")]   = choice.value(0);
+    out[QStringLiteral("client")] = choice.value(1);
+    return out;
+}
+
+void ComputerModel::setHostPowerChoice(const QString& hostUuid, const QString& hostMode,
+                                       const QString& clientMode)
+{
+    PlaytimeManager::get()->setPowerChoice(hostUuid, hostMode, clientMode);
+}
+
+void ComputerModel::checkGameAfterQuit(const QString& hostUuid, const QString& appName)
+{
+    // Eight seconds: a host that CAN close the game needs a moment — Sunshine and its forks ask
+    // the game to exit and wait up to five seconds by default before forcing it — and asking
+    // sooner would report a game that was about to go.
+    constexpr int SettleMs = 8000;
+
+    QTimer::singleShot(SettleMs, this, [this, hostUuid, appName]() {
+        askGameAliveAfterQuit(hostUuid, appName, 0);
+    });
+}
+
+void ComputerModel::askGameAliveAfterQuit(const QString& hostUuid, const QString& appName, int attempt)
+{
+    /*
+     * 8.2.0: a "still running" is asked again before it is said. Eight seconds is not enough for
+     * every game: Ace Combat 8 (started through start_protected_game.exe, its anti-cheat) left
+     * 12 s after Vibeshine ended it — GAMEALIVE at +9 s, Steam's own log saying the processes
+     * exited 3 s later, twice (26/10 and 28/10) — and the notice said a game was running that
+     * was a moment from gone. So: every 4 s, six more times (32 s after the Quit in all), and
+     * the notice only if the game is still there at the last one. A game Vibeshine cannot
+     * close at all (the Xbox app case this exists for) is still running then.
+     */
+    constexpr int RetryMs = 4000;
+    constexpr int Retries = 6;
+
+    const int computerIndex = indexOfUuid(hostUuid);
+    if (computerIndex < 0 || !bridgeAllowed(computerIndex))   // see requestHostNetInfo()
+        return;
+
+    NvComputer* computer = m_Computers[computerIndex];
+    QString address;
+    {
+        QReadLocker lock(&computer->lock);
+        address = computer->activeAddress.address();
+    }
+    if (address.isEmpty())
+        return;
+
+    m_streamTweakBridge.requestGameAlive(address,
+        [this, hostUuid, appName, attempt](const QString& response) {
+            // Empty or ERR is a host before 9.2.3: nothing to say, as before.
+            const QJsonObject o = QJsonDocument::fromJson(response.toUtf8()).object();
+            if (!o.value(QStringLiteral("known")).toBool() ||
+                !o.value(QStringLiteral("running")).toBool()) {
+                if (attempt > 0)
+                    qInfo() << "GAMEALIVE after Quit: the game closed" << (8 + attempt * RetryMs / 1000)
+                            << "s after the Quit";
+                return;
+            }
+
+            const QString game = o.value(QStringLiteral("game")).toString();
+            if (attempt < Retries) {
+                QTimer::singleShot(RetryMs, this, [this, hostUuid, appName, attempt]() {
+                    askGameAliveAfterQuit(hostUuid, appName, attempt + 1);
+                });
+                return;
+            }
+            qInfo() << "GAMEALIVE after Quit:" << (game.isEmpty() ? appName : game)
+                    << "is still running on the host";
+            emit gameStillRunningAfterQuit(hostUuid, game.isEmpty() ? appName : game);
         });
 }
 
@@ -1041,7 +1524,7 @@ void ComputerModel::requestStreamTweakStatus(int computerIndex)
                 // badge flips back and the PIN/approval flow resumes automatically —
                 // never surface the raw protocol error to the user.
                 emit streamTweakStatusReceived(computerIndex, QString());
-                requestStreamTweakAuth(computerIndex);
+                reauthAfterRejection(computerIndex, uuid);
                 return;
             }
             emit streamTweakStatusReceived(computerIndex, status);
@@ -1092,6 +1575,18 @@ void ComputerModel::requestStreamTweakAuth(int computerIndex)
             // off it stops enrolling — so the approval could never arrive and the only way
             // out was finding the switch by hand.
             rememberStreamTweakSeen(uuid);
+
+            // StreamLight 8.0: the host section needs "host=1" (StreamTweak 10.0.0); "ver=" lets
+            // the card name an older host as too old rather than as missing.
+            {
+                bool hostSection = false;
+                QString version;
+                for (const QString& token : caps.split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+                    if (token == QLatin1String("host=1")) hostSection = true;
+                    else if (token.startsWith(QLatin1String("ver="))) version = token.mid(4);
+                }
+                emit streamTweakCapsReceived(computerIndex, hostSection, version);
+            }
 
             if (caps.contains(QLatin1String("auth=optional"))) {
                 m_streamTweakPins.remove(uuid);
@@ -1262,9 +1757,9 @@ QVariantMap ComputerModel::hostProfileSettings(int computerIndex, int slot) cons
     return appOverrideToMap(HostProfileManager::get()->settings(m_Computers[computerIndex]->uuid, slot));
 }
 
-QVariantMap ComputerModel::globalLabels() const
+QVariantMap ComputerModel::globalValues() const
 {
-    return inheritedValueLabels(StreamingPreferences::get());
+    return inheritedValues(StreamingPreferences::get());
 }
 
 void ComputerModel::setHostProfileSettings(int computerIndex, int slot, const QVariantMap& ov)
@@ -1299,6 +1794,46 @@ void ComputerModel::removeHostProfile(int computerIndex, int slot)
     emit dataChanged(idx, idx, { ProfileCountRole, ActiveProfileSlotRole, ActiveProfileNameRole });
 }
 
+void ComputerModel::moveHostProfile(int computerIndex, int from, int to)
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return;
+    HostProfileManager::get()->move(m_Computers[computerIndex]->uuid, from, to);
+    // The active slot number changes with a move even though the profile does not: the card's
+    // badge and its settings re-read on these roles.
+    QModelIndex idx = index(computerIndex, 0);
+    emit dataChanged(idx, idx, { ProfileCountRole, ActiveProfileSlotRole, ActiveProfileNameRole });
+}
+
+int ComputerModel::hostProfileSortMode(int computerIndex) const
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return HostProfileManager::SortCreated;
+    return HostProfileManager::get()->sortMode(m_Computers[computerIndex]->uuid);
+}
+
+void ComputerModel::setHostProfileSortMode(int computerIndex, int mode)
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return;
+    HostProfileManager::get()->setSortMode(m_Computers[computerIndex]->uuid, mode);
+    // The cycle and Home's list read the order afresh; the roles are what they re-read on.
+    QModelIndex idx = index(computerIndex, 0);
+    emit dataChanged(idx, idx, { ProfileCountRole, ActiveProfileSlotRole, ActiveProfileNameRole });
+}
+
+QVariantList ComputerModel::hostProfileOrder(int computerIndex) const
+{
+    QVariantList out;
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return out;
+    const QVector<int> order = HostProfileManager::get()->order(m_Computers[computerIndex]->uuid);
+    for (int s : order) out.append(s);
+    return out;
+}
+
+int ComputerModel::hostProfileCreated(int computerIndex, int slot) const
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return slot;
+    return HostProfileManager::get()->created(m_Computers[computerIndex]->uuid, slot);
+}
+
 QVariantMap ComputerModel::hostActiveOverride(int computerIndex) const
 {
     if (computerIndex < 0 || computerIndex >= m_Computers.count()) return QVariantMap();
@@ -1319,11 +1854,12 @@ QVariantMap ComputerModel::lastPlayedFor(int computerIndex) const
     /*
      * Find it in the host's current app list, by name.
      *
-     * ⚠️ This lookup is the gate, not a step towards one. If the name is not there the game
-     * cannot be launched — that IS what the app list means, since it is the list the server
-     * accepts launches from — so the block is not drawn at all rather than offering a button
-     * that would fail. A game uninstalled on the host disappears from apps.json at the next
-     * sync (SunshineSync removes managed entries whose games are gone), and from here with it.
+     * ⚠️ This lookup decides whether the game can be launched — that IS what the app list
+     * means, since it is the list the server accepts launches from. A game uninstalled on the
+     * host disappears from apps.json at the next sync (SunshineSync removes managed entries
+     * whose games are gone), and from here with it. Until 7.0.0 the block was then not drawn
+     * at all; now it stays, with "available" false, and the card greys Play again out and
+     * keeps the pad off it (09/10/2026): the record is still yours, only the launch is gone.
      *
      * ⚠️ By name and not by rec.appId, even though we stored one: ids move when the host
      * rebuilds apps.json, and for StreamTweak-managed entries the id is derived from the
@@ -1343,8 +1879,11 @@ QVariantMap ComputerModel::lastPlayedFor(int computerIndex) const
         }
     }
 
+    // Gone from the host: its artwork is looked up under the id it last had, which is still
+    // the name of the file in the cache if it was ever drawn.
     if (!found)
-        return out;
+        appId = rec.appId;
+    out[QStringLiteral("available")] = found;
 
     // ⚠️ The name, and no app id. The id was handed out here and nothing ever read it: the
     // launch goes through indexOfAppNamed() because the model works in names, and the id is
@@ -1424,6 +1963,31 @@ QVariantMap ComputerModel::runningAppFor(int computerIndex) const
                                    ? QStringLiteral("qrc:/res/no_app_image.png")
                                    : cover.toString();
     return out;
+}
+
+QString ComputerModel::libraryCover(int computerIndex, const QString& name)
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count() || name.isEmpty())
+        return QString();
+
+    NvComputer* computer = m_Computers[computerIndex];
+    NvApp found;
+    {
+        QReadLocker lock(&computer->lock);
+        for (const NvApp& app : computer->appList) {
+            if (app.name.compare(name, Qt::CaseInsensitive) == 0) {
+                found = app;
+                break;
+            }
+        }
+    }
+    if (found.id == 0)
+        return QString();
+
+    // The same manager the host page uses: the file on disk when there is one, a download
+    // otherwise. Its placeholder is not passed on — the tab has its own tile with the name.
+    QUrl cover = m_BoxArtManager.loadBoxArt(computer, found);
+    return cover.scheme() == QStringLiteral("qrc") ? QString() : cover.toString();
 }
 
 QString ComputerModel::formatAgo(const QDateTime& utcStamp)

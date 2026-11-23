@@ -8,6 +8,9 @@
 #include "streaming/vrrratepolicy.h"
 #include "backend/richpresencemanager.h"
 #include "backend/networkbuffers.h"
+#include "backend/pyrowavetest.h"
+#include "backend/uisound.h"
+#include "streaming/input/dualsensehaptics.h"
 
 #include <Limelight.h>
 #include "SDL_compat.h"
@@ -76,9 +79,15 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
     Session::clSetAdaptiveTriggers,
-    // controllerHaptics (6.4.0, with the protocol of Nonary's fork): the DualSense
-    // waveform extension is not taken — nullptr keeps the stream to ordinary rumble.
+    // controllerHaptics: DualSense waveform haptics (7.0.0, from Nonary's tree; the
+    // protocol came in 6.4.0). Non-null advertises ML_FF_HAPTICS_PCM in the SDP, and
+    // each pad with a backend adds LI_CCAP_HAPTICS_PCM to its arrival. Runs on the
+    // control receive thread: DualSenseHaptics::receive only queues, never blocks.
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    DualSenseHaptics::receive
+#else
     nullptr
+#endif
 };
 
 Session* Session::s_ActiveSession;
@@ -319,16 +328,19 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
 
     // Based on the following SDL code:
     // https://github.com/libsdl-org/SDL/blob/120c76c84bbce4c1bfed4e9eb74e10678bd83120/test/testgamecontroller.c#L286-L307
+    // Only the trigger validity bits (dualsensetriggers.h): a waveform being played must
+    // not be switched back to emulated rumble by a trigger change.
     DualSenseOutputReport *state = (DualSenseOutputReport *) SDL_malloc(sizeof(DualSenseOutputReport));
-    SDL_zero(*state);
-    state->validFlag0 = (eventFlags & DS_EFFECT_RIGHT_TRIGGER) | (eventFlags & DS_EFFECT_LEFT_TRIGGER);
-    state->rightTriggerEffectType = typeRight;
-    SDL_memcpy(state->rightTriggerEffect, right, sizeof(state->rightTriggerEffect));
-    state->leftTriggerEffectType = typeLeft;
-    SDL_memcpy(state->leftTriggerEffect, left, sizeof(state->leftTriggerEffect));
+    if (!state || !left || !right) {
+        SDL_free(state);
+        return;
+    }
+    *state = makeDualSenseTriggerReport(eventFlags, typeLeft, typeRight, left, right);
 
     setControllerLEDEvent.user.data2 = (void *) state;
-    SDL_PushEvent(&setControllerLEDEvent);
+    if (SDL_PushEvent(&setControllerLEDEvent) <= 0) {
+        SDL_free(state);
+    }
 }
 
 
@@ -681,6 +693,44 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     return true;
 }
 
+QString Session::hostName() const
+{
+    return m_Computer ? m_Computer->name : QString();
+}
+
+int Session::slowLaunchAfterMs() const
+{
+    const QString uuid = m_Computer ? m_Computer->uuid : QString();
+    return static_cast<int>(PlaytimeManager::get()->slowLaunchAfterMs(uuid, m_App.name));
+}
+
+QStringList Session::streamBadges() const
+{
+    // The Home card's wording (HostStage._resLabel/_codecLabel), so a host reads the same on
+    // the card you launched from and on the curtain that follows it.
+    QStringList b;
+    const int w = m_Preferences->width, h = m_Preferences->height;
+    if (w == 3840 && h == 2160)      b << QStringLiteral("4K");
+    else if (w == 2560 && h == 1440) b << QStringLiteral("1440p");
+    else if (w == 1920 && h == 1080) b << QStringLiteral("1080p");
+    else if (w == 1280 && h == 720)  b << QStringLiteral("720p");
+    else                             b << QStringLiteral("%1×%2").arg(w).arg(h);
+
+    b << QStringLiteral("%1 FPS").arg(m_Preferences->fps);
+    if (m_Preferences->enableHdr) b << QStringLiteral("HDR");
+
+    switch (m_Preferences->videoCodecConfig) {
+    case StreamingPreferences::VCC_FORCE_H264:     b << QStringLiteral("H.264"); break;
+    case StreamingPreferences::VCC_FORCE_HEVC:
+    case StreamingPreferences::VCC_FORCE_HEVC_HDR_DEPRECATED:
+                                                    b << QStringLiteral("HEVC"); break;
+    case StreamingPreferences::VCC_FORCE_AV1:      b << QStringLiteral("AV1"); break;
+    case StreamingPreferences::VCC_FORCE_PYROWAVE: b << QStringLiteral("PyroWave"); break;
+    default: break;   // "Auto codec" says nothing about this stream: left out
+    }
+    return b;
+}
+
 Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences)
     : m_Preferences(preferences ? preferences : StreamingPreferences::get()),
       m_IsFullScreen(m_Preferences->windowMode != StreamingPreferences::WM_WINDOWED || !WMUtils::isRunningDesktopEnvironment()),
@@ -708,6 +758,18 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
         m_StreamTweakEnabled = computer->streamTweakEnabled;
         // 6.3.0: rejoining what is already running, not launching it — see m_RejoinsRunningApp.
         m_RejoinsRunningApp = computer->currentGameId != 0 && computer->currentGameId == app.id;
+        // 8.4.0: GAMES or APPS as the host page shows it — the user's move first, except for the
+        // host controls, which never leave APPS (AppModel::isApp()).
+        m_IsAppEntry = isAppsCategory(app);
+        if (!isHostControlEntry(app)) {
+            const auto moved = PlaytimeManager::get()->categoryOverridesOn(computer->uuid);
+            auto it = moved.constFind(normaliseGameName(app.name));
+            if (it != moved.constEnd()) m_IsAppEntry = *it;
+        }
+        // 8.3.0: the name on the overlay card's chip, taken once here under the computer's lock.
+        // The card is built on the decoder thread every second, and reading the name there
+        // would race the polling thread that can rewrite it.
+        m_OverlayManager.setHostName(computer->name);
     }
 
     // The StreamTweak host-metrics poller. Owned by this Session (parent = this). Polling fails
@@ -1734,10 +1796,14 @@ private:
 
     void run() override
     {
-        // Only quit the running app if our session terminated gracefully
+        // Only quit the running app if our session terminated gracefully. Quit session and
+        // Pause session say what they want themselves; anything else follows the preference.
+        const bool quitHostApp = m_Session->m_HostAppOnEnd >= 0
+                ? m_Session->m_HostAppOnEnd == 1
+                : m_Session->m_Preferences->quitAppAfter;
         bool shouldQuit =
                 !m_Session->m_UnexpectedTermination &&
-                m_Session->m_Preferences->quitAppAfter;
+                quitHostApp;
 
         // ⚠️ There are two senders of /cancel: this one, and the UI's PendingQuitTask
         // behind the "Are you sure you want to quit X?" dialog. They are indistinguishable
@@ -1746,6 +1812,10 @@ private:
         // the app running every time (quitAppAfter was off), and every /cancel came from
         // the dialog. If the question ever comes back, log which side fired rather than
         // reasoning about it.
+
+        // 7.0.2: read by the launch screen in sessionFinished(), to ask StreamTweak afterwards
+        // whether the game really went (Session::endedWithQuit()).
+        m_Session->m_EndedWithQuit = shouldQuit;
 
         // Notify the UI
         if (shouldQuit) {
@@ -1770,7 +1840,16 @@ private:
             // Logging is already done inside NvHTTP
             try {
                 http.quitApp();
-            } catch (const GfeHttpResponseException&) {
+            } catch (const GfeHttpResponseException& e) {
+                // 7.0.2: 599 is quitApp() reading the host back after /cancel and finding the
+                // game still there — the host accepted the quit and could not carry it out.
+                // Seen on 16/10/2026 with an Xbox app game (Gears of War: E-Day): Vibeshine
+                // starts those through explorer.exe, cannot terminate the game's own process,
+                // and the host page then rightly shows it as still running. Until now that was
+                // swallowed here and the user was left to guess; the launch screen reads it in
+                // sessionFinished() and says so.
+                if (e.getStatusCode() == 599)
+                    m_Session->m_HostAppStillRunning = true;
             } catch (const QtNetworkReplyException&) {
             }
 
@@ -2227,9 +2306,16 @@ bool Session::startConnectionAsync()
 
     QString rtspSessionUrl;
 
+    // The curtain's Connect segment ends here and Launch begins (7.0.0). Queued: this runs on
+    // AsyncConnectionStartThread, and the curtain is a main-thread object QML is bound to.
+    const bool resuming = m_Computer->currentGameId != 0 && !hostControl;
+    QMetaObject::invokeMethod(&m_Curtain, [this, resuming]() {
+        m_Curtain.onLaunchRequested(resuming);
+    }, Qt::QueuedConnection);
+
     try {
         NvHTTP http(m_Computer);
-        http.startApp((m_Computer->currentGameId != 0 && !hostControl) ? "resume" : "launch",
+        http.startApp(resuming ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
                       enableGameOptimizations,
@@ -2316,6 +2402,20 @@ bool Session::startConnectionAsync()
         }
     }
 
+    // PyroWave pacing hints (7.0.0, with Nonary's protocol 9ab99497 + 9348def9). The SDP carries
+    // them only on a PyroWave stream. The link is this device's wired link on the route to the
+    // host; the pace is the PyroWave Test's for this host, and only while that link is the one
+    // it was measured on and the host is on the LAN — over Tailscale or a VPN there is no
+    // measured path. Zero means "unknown": the host keeps its own default.
+    {
+        const int clientLinkMbps = NetworkBuffers::routedWiredLinkMbps(QHostAddress(m_Computer->activeAddress.address()));
+        const bool lan = m_Computer->getActiveAddressReachability() == NvComputer::RI_LAN;
+        m_StreamConfig.pyrowaveLinkMbps = (std::max)(0, clientLinkMbps);
+        m_StreamConfig.pyrowavePaceMbps = lan ? PyroWaveTest::paceMbpsFor(m_Computer->uuid, clientLinkMbps) : 0;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "PyroWave pacing hints: link %d Mbps, tested pace %d Mbps",
+                    m_StreamConfig.pyrowaveLinkMbps, m_StreamConfig.pyrowavePaceMbps);
+    }
+
     // If the user has chosen YUV444 without adjusting the bitrate but the host doesn't
     // support YUV444 streaming, use the default non-444 bitrate for the stream instead.
     // This should provide equivalent image quality for YUV420 as the stream would have
@@ -2368,6 +2468,15 @@ bool Session::startConnectionAsync()
 
     emit connectionStarted();
 
+    // Without the wait for the game this is the end of the launch, and the curtain's two
+    // segments are both done; with it the host's watcher has the rest. Same thread rule as above.
+    {
+        const bool waits = waitsForGame();
+        QMetaObject::invokeMethod(&m_Curtain, [this, waits]() {
+            m_Curtain.onStreamStarted(waits);
+        }, Qt::QueuedConnection);
+    }
+
     // Start asking the host how the launch is going. This is the earliest useful moment:
     // LiStartConnection has returned, so the server has already run the app's command and
     // its log line — the one the host watches for — is a beat behind us at most.
@@ -2396,11 +2505,19 @@ bool Session::startConnectionAsync()
                 m_LaunchGate = new LaunchGate(this);
                 connect(m_LaunchGate, &LaunchGate::phaseChanged, this,
                         [this](LaunchPhase p, QString fg, qint64 ms) {
+                            if (p == LaunchPhase::Ready)
+                                m_GateReadyMs = ms;
                             m_Curtain.onLaunchPhase(static_cast<int>(p), fg, ms);
                             emit launchPhaseChanged(static_cast<int>(p), fg, ms);
                         });
                 connect(m_LaunchGate, &LaunchGate::finished, this,
                         [this](LaunchPhase p) {
+                            // 7.0.2: a launch that reached the game teaches the launch screen
+                            // how long this one takes. Only Ready counts — a timeout, a game
+                            // that needs attention or a host that never answered says nothing
+                            // about how long the game normally takes.
+                            if (p == LaunchPhase::Ready && m_GateReadyMs > 0)
+                                PlaytimeManager::get()->recordLaunchTime(m_Computer->uuid, m_App.name, m_GateReadyMs);
                             m_Curtain.finish();
                             // The window has been waiting behind the curtain for this. It
                             // goes up first and the curtain comes down after it, in that
@@ -2517,6 +2634,18 @@ void Session::setShouldExit(bool quitHostApp)
     }
 
     m_ShouldExit = true;
+}
+
+void Session::requestEnd(bool quitHostApp)
+{
+    m_HostAppOnEnd = quitHostApp ? 1 : 0;
+
+    // The same SDL_QUIT the shortcuts always pushed: the loop's orderly stop is unchanged,
+    // only what happens to the host app afterwards is now decided here.
+    SDL_Event event;
+    event.type = SDL_QUIT;
+    event.quit.timestamp = SDL_GetTicks();
+    SDL_PushEvent(&event);
 }
 
 void Session::start()
@@ -2744,29 +2873,14 @@ void Session::exec()
         return;
     }
 
-    // Launch Hue Sync minimized on the client if the feature is enabled.
-    //
-    // Never during an unlock. That session is plumbing for a PIN pad: the window stays hidden,
-    // nobody is watching anything, and it lasts as long as typing four digits — so lighting the
-    // room for it is wrong twice over. The setting, global or per-host, means "a real streaming
-    // session is starting". Guarded here rather than at the setting, which the unlock path
-    // inherits like every other preference.
-    if (m_Preferences->hueSyncIntegration && !m_UnlockMode) {
-        QString huePath = HueSyncManager::discoverExecutable();
-        if (!huePath.isEmpty()) {
-            m_HueSyncManager = new HueSyncManager();
-            if (!m_HueSyncManager->launch(huePath)) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "HueSyncManager: launch failed for %s",
-                            huePath.toUtf8().constData());
-                delete m_HueSyncManager;
-                m_HueSyncManager = nullptr;
-            }
-        } else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "HueSyncManager: Hue Sync executable not found");
-        }
-    }
+    // 7.0.3: the interface sounds let the audio device go for the stream and take it back on
+    // every way out of this function. Not for an unlock: its PIN pad is the interface, and
+    // keeps its sounds.
+    struct UiSoundHold {
+        bool on;
+        explicit UiSoundHold(bool hold) : on(hold) { if (on) UiSound::get()->setStreaming(true); }
+        ~UiSoundHold() { if (on) UiSound::get()->setStreaming(false); }
+    } uiSoundHold(!m_UnlockMode);
 
     // Pump the Qt event loop one last time before we create our SDL window
     // This is sometimes necessary for the QML code to process any signals
@@ -3592,13 +3706,6 @@ DispatchDeferredCleanup:
     }
 
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
-
-    // Terminate Hue Sync if it was launched for this session.
-    if (m_HueSyncManager) {
-        m_HueSyncManager->terminate();
-        delete m_HueSyncManager;
-        m_HueSyncManager = nullptr;
-    }
 
     // Cleanup can take a while, so dispatch it to a worker thread.
     // When it is complete, it will release our s_ActiveSessionSemaphore

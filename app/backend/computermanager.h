@@ -235,13 +235,16 @@ public:
      */
     bool setTailscaleAddress(QString uuid, QString tailscaleIp);
 
-    // The host's stage backdrop. Pass an empty image path AND an empty seed to clear it and
-    // fall back to the name-derived colours. Same shape as setTailscaleAddress above: write
-    // under the host's lock, persist, then tell the model to repaint.
-    bool setStageBackground(QString uuid, QString imagePath, QString seedColor);
+    // The host's stage picture; an empty path clears it. Same shape as setTailscaleAddress
+    // above: write under the host's lock, persist, then tell the model to repaint.
+    // @p lightTheme: the Light theme's picture rather than the Dark one (13/10/2026).
+    bool setStageBackground(QString uuid, QString imagePath, bool lightTheme = false);
     // How opaque the host's card is on Home, in percent (6.0.0). Stored as given: the range
     // is ComputerModel's to enforce, since it is also what the slider is drawn from.
     bool setStageOpacity(QString uuid, int percent);
+    // A second MAC for Wake-on-LAN (8.1.0, issue #45): six bytes, or empty to clear. Checked
+    // by ComputerModel, which parses what the user typed.
+    bool setWakeMacAddress(QString uuid, QByteArray mac);
 
     // The StreamTweak integration for one host. Persisted immediately: the Settings tab is
     // a place people leave by killing the app, so waiting for teardown would lose the choice.

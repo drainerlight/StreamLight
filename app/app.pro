@@ -50,8 +50,15 @@ win32 {
     }
 
     INCLUDEPATH += $$PWD/../libs/windows/include
-    LIBS += dcomp.lib advapi32.lib ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib iphlpapi.lib shell32.lib
+    # hid.lib and cfgmgr32.lib: DualSense waveform haptics (7.0.0, dualsensehid.cpp, dualsensehaptics.cpp)
+    LIBS += dcomp.lib advapi32.lib ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib iphlpapi.lib shell32.lib hid.lib cfgmgr32.lib
+    # taskschd, oleaut32 and secur32: the sign-in task; wtsapi32: is the session locked (8.2.0, backend/signinlaunch.cpp)
+    LIBS += taskschd.lib oleaut32.lib secur32.lib wtsapi32.lib
 }
+# 8.4.0: SettingsScreen.qml, compiled to C++ by qmlcachegen, passed the 65,279 sections a plain
+# COFF object can hold when the TV tab went in (C1128). /bigobj lifts the limit; it changes the
+# object format only, not the code.
+win32-msvc: QMAKE_CXXFLAGS += /bigobj
 macx:!disable-prebuilts {
     INCLUDEPATH += $$PWD/../libs/mac/include $$PWD/../libs/mac/include/SDL2
     LIBS += -L$$PWD/../libs/mac/lib
@@ -59,7 +66,8 @@ macx:!disable-prebuilts {
 
 unix:if(!macx|disable-prebuilts) {
     CONFIG += link_pkgconfig
-    PKGCONFIG += openssl sdl2 SDL2_ttf
+    # No SDL2_ttf since 8.3.0, here as on Windows: the overlays are painted with QPainter.
+    PKGCONFIG += openssl sdl2
 
     # We have our own optimized libopus.a for Steam Link
     if(!config_SL|disable-prebuilts) {
@@ -145,7 +153,9 @@ unix:if(!macx|disable-prebuilts) {
     }
 }
 win32 {
-    LIBS += -llibssl -llibcrypto -lSDL2 -lSDL2_ttf -lavcodec -lavutil -lswscale -lopus -ldxgi -ld3d11 -llibplacebo
+    # No SDL2_ttf since 8.3.0: the overlays are painted with QPainter (overlaymanager.cpp), and its
+    # DLL is no longer in libs/ (libs/README.md).
+    LIBS += -llibssl -llibcrypto -lSDL2 -lavcodec -lavutil -lswscale -lopus -ldxgi -ld3d11 -llibplacebo
     CONFIG += ffmpeg libplacebo
 }
 win32:!winrt {
@@ -153,7 +163,7 @@ win32:!winrt {
 }
 macx {
     !disable-prebuilts {
-        LIBS += -lssl.3 -lcrypto.3 -lavcodec.62 -lavutil.60 -lswscale.9 -lopus -lSDL2 -lSDL2_ttf
+        LIBS += -lssl.3 -lcrypto.3 -lavcodec.62 -lavutil.60 -lswscale.9 -lopus -lSDL2
         CONFIG += discord-rpc
     }
 
@@ -163,11 +173,22 @@ macx {
 
 SOURCES += \
     backend/nvaddress.cpp \
-    backend/coverpalette.cpp \
     backend/linkspeed.cpp \
     backend/linkmatcher.cpp \
     backend/powerstatus.cpp \
     backend/windowmove.cpp \
+    backend/windowchrome.cpp \
+    backend/uisound.cpp \
+    backend/uianimationdriver.cpp \
+    backend/logsandcache.cpp \
+    backend/windowslocation.cpp \
+    backend/xboxpadpower.cpp \
+    backend/steamartwork.cpp \
+    backend/signinlaunch.cpp \
+    backend/tvlink.cpp \
+    backend/huesyncclient.cpp \
+    backend/pyrowavetest.cpp \
+    backend/pyrowaveudpprobe.cpp \
     backend/gradientimage.cpp \
     backend/launchgate.cpp \
     streaming/launchcurtain.cpp \
@@ -196,6 +217,8 @@ SOURCES += \
     settings/videooptions.cpp \
     settings/shortcutmanager.cpp \
     streaming/input/abstouch.cpp \
+    streaming/input/dualsensehaptics.cpp \
+    streaming/input/dualsensehid.cpp \
     streaming/input/gamepad.cpp \
     streaming/input/input.cpp \
     streaming/input/keyboard.cpp \
@@ -213,7 +236,6 @@ SOURCES += \
     singleinstance.cpp \
     XboxTileArtwork.cpp \
     SessionTelemetrySampler.cpp \
-    HueSyncManager.cpp \
     TailscaleManager.cpp \
     streaming/bandwidth.cpp \
     streaming/streamutils.cpp \
@@ -233,15 +255,28 @@ SOURCES += \
 HEADERS += \
     SDL_compat.h \
     backend/nvaddress.h \
-    backend/coverpalette.h \
     backend/linkspeed.h \
     backend/linkmatcher.h \
     backend/powerstatus.h \
     backend/windowmove.h \
+    backend/windowchrome.h \
+    backend/uisound.h \
+    backend/uianimationdriver.h \
+    backend/logsandcache.h \
+    backend/windowslocation.h \
+    backend/xboxpadpower.h \
+    backend/steamartwork.h \
+    backend/signinlaunch.h \
+    backend/tvlink.h \
+    backend/huesyncclient.h \
+    backend/pyrowavetest.h \
+    backend/pyrowaveudpprobe.h \
+    logfile.h \
     backend/gradientimage.h \
     backend/launchgate.h \
     streaming/launchcurtain.h \
     backend/nvapp.h \
+    backend/librarysearch.h \
     cli/pair.h \
     settings/compatfetcher.h \
     settings/mappingfetcher.h \
@@ -266,6 +301,10 @@ HEADERS += \
     settings/videooptions.h \
     settings/shortcutmanager.h \
     streaming/input/input.h \
+    streaming/input/dualsensehaptics.h \
+    streaming/input/dualsensehid.h \
+    streaming/input/dualsensetriggers.h \
+    ../third-party/saxense/packet.h \
     streaming/session.h \
     streaming/clipboardsync.h \
     streaming/clipboardcrypto.h \
@@ -278,7 +317,6 @@ HEADERS += \
     singleinstance.h \
     XboxTileArtwork.h \
     SessionTelemetrySampler.h \
-    HueSyncManager.h \
     TailscaleManager.h \
     streaming/video/decoder.h \
     streaming/vrrratepolicy.h \
@@ -295,6 +333,9 @@ HEADERS += \
     backend/networkbuffers.h \
     diagnostics/gputrace.h \
     streaming/video/pyrowave/pyrowavebitrate.h \
+    streaming/video/pyrowave/pyrowavebandwidth.h \
+    streaming/video/pyrowave/pyrowavecalibrationpolicy.h \
+    streaming/video/pyrowave/pyrowavelinkpolicy.h \
     streaming/video/pyrowave/pyrowaveprotocol.h \
     backend/appupdate.h
 
@@ -592,8 +633,8 @@ win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../h264bitstream/relea
 else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../h264bitstream/debug/ -lh264bitstream
 else:unix: LIBS += -L$$OUT_PWD/../h264bitstream/ -lh264bitstream
 
-INCLUDEPATH += $$PWD/../h264bitstream/h264bitstream
-DEPENDPATH += $$PWD/../h264bitstream/h264bitstream
+INCLUDEPATH += $$PWD/../h264bitstream
+DEPENDPATH += $$PWD/../h264bitstream
 
 !winrt {
     win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../AntiHooking/release/ -lAntiHooking

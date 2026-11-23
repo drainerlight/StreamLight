@@ -30,9 +30,16 @@ Item {
     property bool   paired: false
     property bool   statusUnknown: false
     property bool   wakeable: false
+    // At its lock screen, from StreamTweak's LOCKSTATE (7.0.0, #35): the first button reads
+    // Unlock and starts the PIN pad, and the host page is not opened.
+    property bool   locked: false
     // Put to sleep by this client and not polled until Wake (6.2.0): reads "Asleep" rather
     // than "Offline", because offline is exactly what we cannot know about it.
     property bool   asleep: false
+    // 8.0.0: the streaming server's name while a Library Sync and restart has it down, else "".
+    // For that minute Moonlight's polls find the host offline; the card says why instead.
+    property string serverRestart: ""
+    readonly property bool _restarting: !online && serverRestart.length > 0
     property bool   serverSupported: true
     property string address: ""
     property string tailscaleAddress: ""
@@ -61,6 +68,9 @@ Item {
     // this very screen (§40).
     property var streamOverride: ({})
 
+    // 8.7.1 (#53): what the profile list drops from (HomeScreen.openProfileList).
+    readonly property Item profileAnchor: profileBadge
+
     readonly property int  _effW:       (streamOverride && streamOverride.width   !== undefined) ? streamOverride.width   : StreamingPreferences.width
     readonly property int  _effH:       (streamOverride && streamOverride.height  !== undefined) ? streamOverride.height  : StreamingPreferences.height
     readonly property int  _effFps:     (streamOverride && streamOverride.fps     !== undefined) ? streamOverride.fps     : StreamingPreferences.fps
@@ -85,6 +95,20 @@ Item {
     // "" (unknown) | none | authorized | pending | denied | open
     property string authState: ""
 
+    /*
+     * 8.0.0: the fourth button, StreamTweak's logo, which opens the host section. Always drawn
+     * (shown greyed, never taken away): when it cannot open, this says why, and the line under
+     * the row shows it while the button holds the focus or the pointer. "" = it can open.
+     */
+    property string streamTweakReason: ""
+
+    // The StreamTweak button is under the pointer: its name (and why it is grey) shows beside
+    // the row. Not a Qt ToolTip — that one is the style's small grey box, and as a child of the
+    // button it would also fade with a greyed button.
+    property bool _markHovered: false
+    // Where the StreamTweak button sits in the row, for the words above it.
+    property real _markX: 0
+
     // Link speed, already formatted by the caller — the stage never parses.
     property string hostLinkText: ""
     property bool   willSwitchLink: false
@@ -106,91 +130,41 @@ Item {
     // with the speed it went back to, which is the thing the user was waiting to be told.
     property string justReadyText: qsTr("Ready")
 
-    // The backdrop. Two colours, whatever their origin: a hash of the host name until the
-    // user picks something, then the pair CoverPalette derived from their picture or their
-    // colour. Keeping it a plain property is what lets the source change without this file
-    // knowing anything about it.
-    property color backdropFrom: "#1c1c1c"
-    property color backdropTo:   "#0d0d0d"
-
     /*
-     * ── The backdrop, baked into one ramp when there is no picture ───────────────────────
+     * ── The card's backdrop (7.0.0, rebuilt 08-09/10/2026) ──────────────────────────────
      *
-     * ⚠️ Two stacked ramps used to draw this: the host's colour pair, and a scrim over it for
-     * the text. Both horizontal, both dithered — and the card banded anyway. The measurement
-     * says why, and it is not the dither: across the LEFT 60% of the card the base ramp offers
-     * 48 distinct values and the composite offers EIGHT. The scrim's alpha throws away forty
-     * of them, so what looks like a gradient there is really a flat field with six or eight
-     * accidental steps in it, each a couple of hundred pixels wide. No dithering can invent
-     * levels the 8-bit output of a blend has already discarded — an ordered tile can only
-     * feather eight pixels of each step, and 1-D error diffusion was tried and measured
-     * (48 px of flat run down to 27) and still did not show.
+     * The card is a surface of the THEME, tinted by the ACCENT: a ramp from the accent at
+     * _tintLeft on the left, where the text is, to _tintRight on the right (see baseRampLayer).
+     * Nothing per host decides its colour — per-host hues were dropped by decision on 08/10 —
+     * and the "Add a host" card wears the same surface, so the two read as one family.
      *
-     * So the two ramps become one, which is possible because both run along x: their composite
-     * is a function of x alone and can be written as a single set of stops. And the part that
-     * was nearly flat is made EXACTLY flat, because a region spanning six levels over fourteen
-     * hundred pixels is not a gradient — it is a flat colour that occasionally jumps, and the
-     * jumps are the artefact. One quantisation, one dither, and two fewer effect passes.
+     * The tints are MEASURED, not chosen by eye (09/10/2026): the most accent that keeps
+     * text and text2 at 4.5:1 and the state colours at 3:1 on every one of the 24 accents,
+     * at the card's lowest opacity over the floor. Dark 20% → 6%, Light 40% → 12% — the vivid accent
+     * in both: Light's darkened accentFill at those strengths only turned the card grey. text3 does
+     * not survive any tint at 4.5:1, so the card's captions use text2 (_onBg3).
      *
-     * The stops below follow the old composite's own values, so the card looks like it did
-     * apart from the banding: flat at what the blend produced around 30% across, then falling
-     * away through the values it produced at 72% and beyond.
+     * ── A picture ──
+     * A host may have a picture instead, shown as 6.5.1 showed it (Marcello, 09/10/2026: «non
+     * deve essere scurita, ma apparire come appariva nella 6.5.1»): whole, under 6.5.1's own
+     * scrim — near-black, dense where the name and the fields are (90% at the left edge, 69% at
+     * 30%, 25% at 62%) and gone by the right edge — with the words in the light stage* tones,
+     * whatever the theme. The scrim is inside backdropGroup, as it was, so the card opacity
+     * thins it with the picture.
      *
-     * ⚠️ Only when there is no picture. Over a picture the scrim is veiling an image and has to
-     * stay a separate layer — that case is a different problem, and the colour bias inside the
-     * provider is what addresses it.
+     * (On 09/10 the picture had a veil of its own for a few hours — light or dark by the
+     * picture's luminance, ~80% across the words — which kept the text readable on any picture
+     * and darkened it far too much. Gone, with ComputerModel.pictureLuminance and Theme.paper*.)
      */
-    function _lerp(a, b, f) { return a + (b - a) * f }
-
-    function _baseAt(p) {
-        var f = Qt.tint(backdropFrom, Qt.rgba(0, 0, 0, 0))
-        var t = Qt.tint(backdropTo,   Qt.rgba(0, 0, 0, 0))
-        var e = Qt.tint("#05080a",     Qt.rgba(0, 0, 0, 0))
-        if (p <= 0.46) {
-            var k = p / 0.46
-            return [ _lerp(f.r, t.r, k), _lerp(f.g, t.g, k), _lerp(f.b, t.b, k) ]
-        }
-        if (p <= 0.90) {
-            var k2 = (p - 0.46) / 0.44
-            return [ _lerp(t.r, e.r, k2), _lerp(t.g, e.g, k2), _lerp(t.b, e.b, k2) ]
-        }
-        return [ e.r, e.g, e.b ]
-    }
-
-    function _scrimAlphaAt(p) {
-        if (p <= 0.30) return _lerp(0xb0 / 255, 0x80 / 255, p / 0.30)
-        if (p <= 0.62) return _lerp(0x80 / 255, 0x30 / 255, (p - 0.30) / 0.32)
-        return _lerp(0x30 / 255, 0.0, (p - 0.62) / 0.38)
-    }
-
-    // What the two layers produced at p, as one colour.
-    function _compositeAt(p) {
-        var b = _baseAt(p)
-        var a = _scrimAlphaAt(p)
-        var s = Qt.tint("#05080a", Qt.rgba(0, 0, 0, 0))
-        return Qt.rgba(s.r * a + b[0] * (1 - a),
-                       s.g * a + b[1] * (1 - a),
-                       s.b * a + b[2] * (1 - a), 1)
-    }
-
-    // Re-derived whenever the host's colours change, which is what a binding on the two
-    // properties gives us — a function result assigned once would freeze on the first host.
-    readonly property color _flatColour: _compositeAt(0.30)
-    readonly property var _bakedStops: [
-        { pos: 0.00, color: _flatColour },
-        { pos: 0.55, color: _flatColour },
-        { pos: 0.72, color: _compositeAt(0.72) },
-        { pos: 0.90, color: _compositeAt(0.92) },
-        { pos: 1.00, color: _compositeAt(1.00) }
-    ]
-
-    // Optional picture behind the gradient. Drawn sharp and at full saturation: the earlier
-    // version blurred and desaturated it on the theory that this is what makes a picture read
-    // as a background, and on screen that theory was wrong — it just looked like a bad copy of
-    // the picture. What actually keeps the text readable is the scrim below, which is dense
-    // exactly where the name and the fields are and gone by the right-hand side, so the
-    // picture gets to be itself over most of the card.
+    // Optional picture over the surface. Drawn sharp and at full saturation: a blurred,
+    // desaturated copy only looked like a bad copy of the picture.
     property string backdropImage: ""
+
+    readonly property bool _hasPicture: !addMode && backdropImage !== ""
+
+    // The accent in the card's surface, left and right of the ramp — see the note above.
+    readonly property real _tintLeft:  Theme.light ? 0.40 : 0.20
+    readonly property real _tintRight: Theme.light ? 0.12 : 0.06
 
     // How opaque the card is, 0..1 (6.0.0). Chosen per host in StageBackgroundDialog and
     // stored with the rest of its backdrop; ComputerModel supplies the default and the floor.
@@ -293,43 +267,30 @@ Item {
     // point: the layout's proportions are already tuned and a global factor cannot break
     // them. AppsScreen MUST use the same number — a host and its games drawn at two
     // different scales is the one thing a shared grammar does not survive.
-    readonly property real _u: Math.max(0.62, Math.min(1.60, width / 1330))
+    // Times the user's Interface scale (7.0.0), like Theme.uiScale for the dialogs.
+    readonly property real _u: Math.max(0.62, Math.min(1.60, width / 1330, Theme.heightFit)) * Theme.scaleFactor
 
     function _px(n) { return Math.round(n * _u) }
 
-    // ── Reading against the backdrop ─────────────────────────────────────────
     /*
-     * What the left of the card actually is, once the scrim has been laid over the backdrop —
-     * and therefore what the text has to be legible against.
+     * The card's reading colours: the theme's on the bare card, the picture's over a picture.
      *
-     * White was hardcoded here, which held only because every backdrop happened to be dark.
-     * It stops holding the moment the user picks a bright colour or a bright picture, and
-     * "every backdrop so far" is not something an interface can depend on. The scrim is
-     * densest exactly where the name and the fields sit, so this samples the composite at
-     * that end rather than at the card's average.
+     * ⚠️ 7.0.0 (13/10/2026, Marcello: «bottoni, font e badge dei tile host devono seguire
+     * esteticamente sempre e solo l'immagine di background, a prescindere dal tema»). Over a
+     * picture EVERYTHING on the card — words, chips, badges, buttons, the shoulder prompts —
+     * is drawn as in 6.5.1, light on the picture's dark scrim, in Light as in Dark. Only the
+     * bare card, which IS the theme's surface tinted by the accent, follows the theme.
+     *
+     * And the chips, badges and buttons are back to 6.5.1's transparency: a wash of the
+     * reading colour (8%) under a hairline, not the neutral Plate they stood on from 09/10.
      */
-    // ⚠️ Without a picture this is now the flat colour the ramp actually paints there, not a
-    // blend recomputed here — the two used to be worked out separately and could disagree.
-    // With one, the picture is unknowable and "#202020" stands in for it, as before.
-    readonly property color _bgOpaque:
-        backdropImage !== "" ? Theme.blend("#202020", "#e605080a")
-                             : _flatColour
-
-    /*
-     * ⚠️ And then laid over the app's FLOOR at the card's opacity (6.0.0). Since the card is
-     * translucent, what is behind the text is not the backdrop alone but the backdrop at
-     * backdropOpacity over the floor — a darker thing. Judging the text against the opaque
-     * backdrop could choose dark text for a light colour and then draw it on something much
-     * darker than it was chosen for. The floor is AmbientBackground's ramp around the card's
-     * middle height, which is where the name and the fields sit.
-     */
-    readonly property color _floorUnderCard:
-        Qt.tint("#151515", Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.05))
-    readonly property color _bgUnderText:
-        Theme.blend(_floorUnderCard, Qt.rgba(_bgOpaque.r, _bgOpaque.g, _bgOpaque.b, backdropOpacity))
-
-    readonly property color _onBg:    Theme.onColor(_bgUnderText)
-    readonly property bool  _bgIsLight: _onBg !== Qt.rgba(1, 1, 1, 1)
+    // The hairlines and the wash, picked like the words. (`_glass`, the profile badge's dark
+    // glass, went on 05/11/2026: the badge is the accent-tinted glass of a chosen value now.)
+    readonly property color _line:     _hasPicture ? Theme.stageLine     : Theme.line
+    readonly property color _lineHigh: _hasPicture ? Theme.stageLineHigh : Theme.lineHigh
+    readonly property color _wash:     Qt.rgba(_onBg.r, _onBg.g, _onBg.b, 0.08)   // 6.5.1's #14ffffff
+    readonly property color _washHigh: Qt.rgba(_onBg.r, _onBg.g, _onBg.b, 0.15)   // 6.5.1's #26ffffff
+    readonly property color _onBg: _hasPicture ? Theme.stageText : Theme.text
 
     // The secondary and tertiary tones have to flip with it, or a dark-on-light card keeps
     // pale grey subtitles that vanish.
@@ -339,8 +300,12 @@ Item {
     // a fairly dark one, so the same grey ends up with far less contrast against it than it
     // was ever meant to have. The field captions — LOCAL ADDRESS, TAILSCALE, HOST LINK —
     // were the ones that lost, being the smallest text on the card.
-    readonly property color _onBg2: _bgIsLight ? Qt.rgba(0, 0, 0, 0.62) : Theme.text2
-    readonly property color _onBg3: _bgIsLight ? Qt.rgba(0, 0, 0, 0.45) : Qt.rgba(1, 1, 1, 0.74)
+    readonly property color _onBg2: _hasPicture ? Theme.stageText2 : Theme.text2
+    // text2's tone, always: text3 is the tone that loses first, and on the accent-tinted surface
+    // it falls under 4.5:1 for most accents (see the note on the backdrop).
+    readonly property color _onBg3: _onBg2
+    // A warning written straight on the card (the host-link field), in the tone of the rest.
+    readonly property color _onBgWarning: _hasPicture ? Theme.stageWarning : Theme.warning
 
     // ── The actions ──────────────────────────────────────────────────────────
     // Built from the host's state rather than shown-and-disabled, so the primary button
@@ -378,16 +343,26 @@ Item {
 
         if (statusUnknown)
             list.push({ kind: "open", label: qsTr("Open"), danger: false, disabled: true })
+        else if (online && paired && locked)
+            list.push({ kind: "unlock", label: qsTr("Unlock"), danger: false, disabled: false })
         else if (online && paired)
             list.push({ kind: "open", label: qsTr("Open"), danger: false, disabled: false })
         else if (online)
             list.push({ kind: "pair", label: qsTr("Pair"), danger: false, disabled: false })
+        else if (_restarting)    // not Wake: the PC is on, only its server is restarting
+            list.push({ kind: "open", label: qsTr("Open"), danger: false, disabled: true })
         else if (wakeable)
             list.push({ kind: "wake", label: qsTr("Wake"), danger: false, disabled: false })
         else
             list.push({ kind: "open", label: qsTr("Open"), danger: false, disabled: true })
 
         list.push({ kind: "profiles", label: qsTr("Profiles"), danger: false, disabled: false })
+        // 8.0.0: the host section — StreamTweak's logo, no word (plan 8.0 / 10.0, "Accesso"),
+        // between Profiles and Options (21/10/2026). `label` is still set: it is the button's
+        // accessible name and the words above it under the pointer.
+        list.push({ kind: "streamtweak", mark: true, label: qsTr("StreamTweak"), danger: false,
+                    disabled: streamTweakReason.length > 0, reason: streamTweakReason,
+                    since: "8.0.0" })
         list.push({ kind: "options",  label: qsTr("Options"),  danger: false, disabled: false })
 
         return list
@@ -397,7 +372,10 @@ Item {
     // the card is showing the block. Keeping it on the same index line rather than making it
     // a zone of its own is what lets Right walk into it and Left walk back out with no new key
     // handling: it sits to the right of the buttons, which is what Right already means here.
-    readonly property bool _panelActionReachable: _hasPanel
+    // A last game no longer on the host (lastPlayed.available false, 7.0.0) keeps its block,
+    // with Play again greyed out and out of the pad's way.
+    readonly property bool _panelActionReachable: _hasRunning
+        || (_hasLastPlayed && lastPlayed.available !== false)
     readonly property int _maxActionIndex: actions.length - (_panelActionReachable ? 0 : 1)
 
     // What that button does, decided once so the pad, the mouse and the label cannot disagree.
@@ -466,14 +444,26 @@ Item {
           statusUnknown          ? qsTr("Checking")
         : online && paired       ? qsTr("Online")
         : online                 ? qsTr("Reachable")
+        : _restarting            ? qsTr("Restarting")
         : asleep                 ? qsTr("Asleep")
         :                          qsTr("Offline")
 
+    // ⚠️ Over a picture the chips' dots follow the card's own palette (stage*, light in both
+    // themes), like the words beside them. They took the theme's colours until 21/10/2026, so
+    // in Light the dots went dark on a dark picture while their labels stayed light.
+    readonly property color _onBgOnline:  _hasPicture ? Theme.stageOnline  : Theme.online
+    readonly property color _onBgDanger:  _hasPicture ? Theme.stageDanger  : Theme.danger
+    readonly property color _onBgOffline: _hasPicture ? Theme.stageOffline : Theme.offline
+    // The accent as a mark (a dot, a word): the bright accent over a picture, as the profile
+    // badge already does; the contrast-checked ink on the theme's own surface.
+    readonly property color _onBgInk:     _hasPicture ? Theme.accent : Theme.inkText
+
     readonly property color _stateColor:
-          statusUnknown          ? Theme.text3
-        : online && paired       ? Theme.online
-        : online                 ? Theme.warning
-        :                          Theme.offline
+          statusUnknown          ? _onBg2
+        : online && paired       ? _onBgOnline
+        : online                 ? _onBgWarning
+        : _restarting            ? _onBgWarning
+        :                          _onBgOffline
 
     readonly property string _authLabel:
           authState === "authorized" ? qsTr("StreamTweak authorized")
@@ -482,9 +472,9 @@ Item {
         :                              ""
 
     readonly property color _authColor:
-          authState === "authorized" ? Theme.accent
-        : authState === "pending"    ? Theme.warning
-        :                              Theme.danger
+          authState === "authorized" ? _onBgInk
+        : authState === "pending"    ? _onBgWarning
+        :                              _onBgDanger
 
     // The one line under the name. It answers "can I press A?" before the eye reaches the
     // buttons. The active profile used to be tacked onto the end of it and is now the badge
@@ -497,9 +487,106 @@ Item {
              : online && paired ? (serverSupported ? qsTr("Ready to stream")
                                                    : qsTr("This host needs a newer StreamLight"))
              : online           ? qsTr("Not paired yet")
+             : _restarting      ? qsTr("%1 is restarting · back in about a minute").arg(serverRestart)
              : asleep           ? qsTr("Asleep · wake it to use it")
              : wakeable         ? qsTr("Offline · can be woken up")
              :                    qsTr("Offline")
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // The card's shadow (8.8.2)
+    // ═════════════════════════════════════════════════════════════════════════
+    /*
+     * The same shadow the game covers cast, by the same means and with the same numbers:
+     * HeroCover's silhouette in a padded item, blurred by a MultiEffect that matches it 1:1
+     * (blurMax 40, blur 0.9, opacity 0.65, the offset the Home cover uses). HeroCover.qml has
+     * the measurements and the reason the room is built into the geometry.
+     *
+     * ⚠️ One step more than the cover needs: the card is translucent (Card opacity 70-100),
+     * so a shadow lying under it would show through and darken it. The card's own area is
+     * cut out of the shadow with an inverted mask, and what is left is only what falls outside.
+     * Checked off screen against the cover's shadow: the same outside, nothing inside.
+     *
+     * ⚠️ The cut is SOFT and sits one pixel inside the card's edge (cardShadowHole). The first
+     * version cut on the silhouette itself with the default threshold, which is a hard step:
+     * the shadow met the card's antialiased border along a staircase, plain to see round the
+     * corners (Marcello, 13/11/2026). With the hole a pixel smaller and its edge blended
+     * (maskSpreadAtMin), the join lies under the border instead of beside it.
+     *
+     * Drawn before the card, as its sibling: the card clips.
+     */
+    readonly property bool _cardShadow: !Theme.reduceAnimations
+    readonly property int  _shadowPad: 40
+    readonly property real _shadowOffset: _px(10)
+
+    Item {
+        id: cardSilhouette
+        x: card.x - stage._shadowPad
+        y: card.y - stage._shadowPad
+        width: card.width + stage._shadowPad * 2
+        height: card.height + stage._shadowPad * 2 + stage._shadowOffset
+        layer.enabled: stage._cardShadow
+        visible: false
+        Rectangle {
+            x: stage._shadowPad
+            y: stage._shadowPad
+            width: card.width
+            height: card.height
+            radius: card.radius
+            color: "black"
+        }
+    }
+
+    Item {
+        id: cardShadowHole
+        x: cardSilhouette.x
+        y: cardSilhouette.y
+        width: cardSilhouette.width
+        height: cardSilhouette.height
+        layer.enabled: stage._cardShadow
+        visible: false
+        Rectangle {
+            x: stage._shadowPad + 1
+            y: stage._shadowPad + 1
+            width: card.width - 2
+            height: card.height - 2
+            radius: Math.max(0, card.radius - 1)
+            color: "black"
+        }
+    }
+
+    MultiEffect {
+        id: cardShadowPass
+        x: cardSilhouette.x
+        y: cardSilhouette.y
+        width: cardSilhouette.width
+        height: cardSilhouette.height
+        source: cardSilhouette
+        shadowEnabled: stage._cardShadow
+        shadowColor: "#000000"
+        shadowBlur: 0.9
+        shadowVerticalOffset: stage._shadowOffset
+        shadowOpacity: 0.65
+        blurMax: stage._shadowPad
+        autoPaddingEnabled: false
+        // Only a texture for the pass below.
+        layer.enabled: stage._cardShadow
+        visible: false
+    }
+
+    MultiEffect {
+        x: cardSilhouette.x
+        y: cardSilhouette.y
+        width: cardSilhouette.width
+        height: cardSilhouette.height
+        visible: stage._cardShadow
+        source: cardShadowPass
+        maskEnabled: true
+        maskSource: cardShadowHole
+        maskInverted: true
+        maskThresholdMin: 0.5
+        maskSpreadAtMin: 1.0
+        autoPaddingEnabled: false
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -527,11 +614,14 @@ Item {
         readonly property real backdropOpacity: stage.backdropOpacity
 
         // Transparent behind the backdrop, which covers the whole card and is thinned on its
-        // own. In add mode there is no backdrop, so the plain fill takes the same opacity.
-        color: stage.addMode ? Qt.rgba(Theme.card.r, Theme.card.g, Theme.card.b, card.backdropOpacity)
-                             : "transparent"
+        // own — the "Add a host" card too, since 7.0.0 the same surface as a host's.
+        color: "transparent"
         border.color: Theme.line
-        border.width: 1
+        // 8.8.2: no outline under the shadow. The game covers have none, and a line round the
+        // card beside its shadow read as a frame, not as a card lifted off the floor (Marcello,
+        // 13/11/2026). With the shadow off (Reduce animations) the line is what marks the edge,
+        // as before.
+        border.width: stage._cardShadow ? 0 : 1
         clip: true
 
         // ── Backdrop ─────────────────────────────────────────────────────────
@@ -569,28 +659,26 @@ Item {
             }
         }
 
-        // ── 1. The base ramp ─────────────────────────────────────────────────
+        // ── 1. The surface ───────────────────────────────────────────────────
         Item {
             id: baseRampLayer
             anchors.fill: parent
             layer.enabled: true
             visible: false
-
+            // Dithered: a plain Rectangle gradient bands visibly across a 4K card, the steps of
+            // a small colour change spread over two thousand pixels (backend/gradientimage.h).
             DitheredGradient {
                 anchors.fill: parent
                 orientation: Qt.Horizontal
-                // With a picture this is only what shows while the picture loads, so it stays
-                // the plain colour pair. Without one it is the whole backdrop, and it carries
-                // the scrim baked in — see the note on _bakedStops.
-                stops: stage.backdropImage !== ""
-                       ? [ { pos: 0.0,  color: stage.backdropFrom },
-                           { pos: 0.46, color: stage.backdropTo },
-                           { pos: 0.90, color: "#05080a" } ]
-                       : stage._bakedStops
+                stops: [
+                    { pos: 0.0,  color: Qt.tint(Theme.card, Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, stage._tintLeft)) },
+                    { pos: 0.55, color: Qt.tint(Theme.card, Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, (stage._tintLeft + stage._tintRight) * 0.4)) },
+                    { pos: 1.0,  color: Qt.tint(Theme.card, Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, stage._tintRight)) }
+                ]
             }
         }
 
-        // ── 2. The host's picture, over the ramp it was derived from ─────────
+        // ── 2. The host's picture, over the surface ──────────────────────────
         /*
          * ⚠️ On its own effect, and NOT grouped into a layer with the ramps around it.
          *
@@ -628,49 +716,17 @@ Item {
             visible: false
         }
 
-        // ── 3. The scrim ─────────────────────────────────────────────────────
-        // Not decoration: without it a light backdrop and white text meet and the text loses.
-        // Densest on the left where the name and the fields are, gone by the right edge so the
-        // host's colour still reads as a colour. Over a picture it starts denser and clears
-        // sooner — reaching fully transparent at the right edge matters, the 19% black that
-        // used to sit there is what made artwork look washed out. Its alpha ramp is dithered
-        // too: a staircase in alpha bands just as visibly as one in a colour channel.
-        // ⚠️ Only over a picture now. Without one the scrim is baked into the ramp above, and
-        // drawing it here as well would veil the card twice. Its alpha values are kept here
-        // verbatim because _scrimAlphaAt() reproduces them — if these change, that changes.
-        Item {
-            id: scrimLayer
-            anchors.fill: parent
-            // ⚠️ Gated as well, not just the effect below. An invisible item with layer.enabled
-            // still keeps its FBO — that is exactly how these mask sources work — so leaving it
-            // on would go on rendering a scrim nobody samples on every card without a picture,
-            // which is most of them.
-            layer.enabled: stage.backdropImage !== ""
-            visible: false
-
-            DitheredGradient {
-                anchors.fill: parent
-                orientation: Qt.Horizontal
-                stops: [
-                    { pos: 0.0,  color: "#e605080a" },
-                    { pos: 0.30, color: "#b005080a" },
-                    { pos: 0.62, color: "#4005080a" },
-                    { pos: 1.0,  color: "#0005080a" }
-                ]
-            }
-        }
-
         /*
-         * ── The three passes, drawn as ONE layer (6.0.0) ─────────────────────
+         * ── The passes, drawn as ONE layer (6.0.0) ────────────────────────────
          *
-         * The effects that draw the ramp, the picture and the scrim used to sit each beside
+         * The effects that draw the surface and the picture (and, until 7.0.0, a scrim) used to sit each beside
          * its source. They are gathered here so card.backdropOpacity can apply to what they
          * make TOGETHER: `layer.enabled` flattens the group first, then the opacity thins the
          * result once. Without the layer, Qt multiplies the opacity into each child and they
          * are blended one over the other at 0.85 apiece — ramp and picture stacked that way
          * are 0.98 opaque, and the flow behind would barely show at all.
          *
-         * ⚠️ Only the EFFECTS moved. Their sources (baseRampLayer, backdropPicture, scrimLayer)
+         * ⚠️ Only the EFFECTS moved. Their sources (baseRampLayer, backdropPicture)
          * stay where they were: they are invisible textures, their order means nothing, and
          * backdropPicture in particular must remain sampled directly by its own effect — see
          * the long note above it for the 5.1.0 regression that grouping it caused.
@@ -681,7 +737,6 @@ Item {
         Item {
             id: backdropGroup
             anchors.fill: parent
-            visible: !stage.addMode
             opacity: card.backdropOpacity
             layer.enabled: card.backdropOpacity < 1
 
@@ -695,7 +750,7 @@ Item {
 
             MultiEffect {
                 anchors.fill: parent
-                visible: stage.backdropImage !== ""
+                visible: stage._hasPicture
                 source: backdropPicture
                 autoPaddingEnabled: false
                 maskEnabled: true
@@ -704,11 +759,33 @@ Item {
 
             MultiEffect {
                 anchors.fill: parent
-                visible: stage.backdropImage !== ""
+                visible: stage._hasPicture
                 source: scrimLayer
                 autoPaddingEnabled: false
                 maskEnabled: true
                 maskSource: cardMask
+            }
+        }
+
+        // ── The scrim over a picture: 6.5.1's, verbatim ──────────────────────
+        // Densest on the left where the name and the fields are, gone by the right edge so the
+        // picture shows as itself over most of the card. Its alpha ramp is dithered: a staircase
+        // in alpha bands as visibly as one in a colour channel. ⚠️ layer.enabled is gated too —
+        // an invisible item with a layer keeps rendering its FBO on every card without a picture.
+        Item {
+            id: scrimLayer
+            anchors.fill: parent
+            layer.enabled: stage._hasPicture
+            visible: false
+            DitheredGradient {
+                anchors.fill: parent
+                orientation: Qt.Horizontal
+                stops: [
+                    { pos: 0.0,  color: "#e605080a" },
+                    { pos: 0.30, color: "#b005080a" },
+                    { pos: 0.62, color: "#4005080a" },
+                    { pos: 1.0,  color: "#0005080a" }
+                ]
             }
         }
 
@@ -763,13 +840,13 @@ Item {
                     if (stage.hasTailscale)
                         c.push({ text: stage.tailscaleActive ? qsTr("Tailscale active")
                                                              : qsTr("Tailscale available"),
-                                 dot: stage.tailscaleActive ? Theme.accent : "#ffffff" })
+                                 dot: stage.tailscaleActive ? stage._onBgInk : stage._onBg })
                     // Last, so it reads as the newest thing to have happened, and never both
                     // at once: one is the wait, the other is the end of it.
                     if (stage.linkChanging)
-                        c.push({ text: qsTr("Link"), dot: Theme.warning })
+                        c.push({ text: qsTr("Link"), dot: stage._onBgWarning })
                     else if (stage.justReady)
-                        c.push({ text: stage.justReadyText, dot: Theme.online })
+                        c.push({ text: stage.justReadyText, dot: stage._onBgOnline, tick: true })
                     return c
                 }
 
@@ -778,7 +855,7 @@ Item {
                     width: chipContent.implicitWidth + stage._px(26)
                     radius: stage._px(5)
                     color: "transparent"
-                    border.color: Theme.line
+                    border.color: stage._line
                     border.width: 1
 
                     Row {
@@ -787,10 +864,20 @@ Item {
                         spacing: stage._px(7)
 
                         Rectangle {
+                            visible: modelData.tick !== true
                             anchors.verticalCenter: parent.verticalCenter
                             width: stage._px(7); height: width
                             radius: width / 2
                             color: modelData.dot
+                        }
+                        // The link wait ended well (7.0.0): a check draws itself in place of
+                        // the dot, then stays until the chip goes.
+                        SuccessTick {
+                            visible: modelData.tick === true
+                            anchors.verticalCenter: parent.verticalCenter
+                            size: stage._px(16)
+                            color: modelData.dot
+                            Component.onCompleted: if (visible) play()
                         }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
@@ -851,6 +938,8 @@ Item {
                     // Its own line if need be, and ellipsis only past the WHOLE card width —
                     // never to make room for the profile, which wraps instead.
                     width: Math.min(implicitWidth, nameFlow.width)
+                    // Plain text: a name from the host, never markup (8.5.0, security review).
+                    textFormat: Text.PlainText
                     text: stage.addMode ? qsTr("Add a host") : stage.hostName
                     color: stage._onBg
                     font.family: Theme.family
@@ -893,7 +982,7 @@ Item {
 
                     Repeater {
                         model: stage._hasProfiles
-                               ? [{ btn: "LB", key: "Q", kind: "prevProfile" }] : []
+                               ? [{ btn: "LT", key: "Q", kind: "prevProfile" }] : []
                         delegate: Item {
                             anchors.verticalCenter: parent.verticalCenter
                             width: stage._px(40); height: stage._px(28)
@@ -902,6 +991,7 @@ Item {
                                 buttonKey: modelData.btn
                                 keyLabel:  modelData.key
                                 size: stage._px(26)
+                                onDark: stage._hasPicture
                                 opacity: lbMouse.containsMouse ? 1.0 : 0.85
                             }
                             MouseArea {
@@ -930,17 +1020,29 @@ Item {
                          * any accent, and leaves the accent as the badge's mark rather than
                          * a block of colour competing with the host's name.
                          */
-                        color: Qt.rgba(Theme.ground.r, Theme.ground.g, Theme.ground.b, 0.80)
-                        border.color: Theme.accent
-                        border.width: Math.max(1, stage._px(2))
+                        // 7.0.0: over a picture 6.5.1's dark glass, in either theme; on the bare
+                        // card the theme's own ground, so a light card is not stamped with a
+                        // near-black block — with the accent as a line (ink) and as text (inkText).
+                        //
+                        // ⚠️ 05/11/2026 (Marcello, with variant A of docs/mockups/pulsanti): the
+                        // glass of a chosen value instead — the wash tinted by the accent (18%)
+                        // under a 1 px accent hairline at 55%, the name in the reading colour.
+                        // The 18/09 problem does not come back: it was accent text on an accent
+                        // tint; the words are the card's own light (or dark) now, not the accent.
+                        readonly property color _hue: stage._hasPicture ? Theme.accent : Theme.accentFill
+                        color: Qt.rgba(_hue.r, _hue.g, _hue.b, profileBadge._hovered ? 0.28 : 0.18)
+                        // Hover only with the mouse in hand, as on the action row (_hovered there):
+                        // a pointer parked over the badge must not light it while the pad drives.
+                        readonly property bool _hovered: profileBadgeMouse.containsMouse && stage.pointerMode
+                        border.color: Qt.rgba(_hue.r, _hue.g, _hue.b, 0.55)
+                        border.width: 1
 
                         Text {
                             id: profileBadgeText
                             anchors.centerIn: parent
                             text: stage.activeProfileSlot >= 0 && stage.activeProfileName.length > 0
                                       ? stage.activeProfileName : qsTr("Global")
-                            // The full accent, on the dark glass above.
-                            color: Theme.accent
+                            color: stage._onBg
                             font.family: Theme.family
                             // Below the host name, clearly above everything else: this is the
                             // second-most important thing on the card, not the first.
@@ -949,11 +1051,31 @@ Item {
                             font.pixelSize: stage._px(34)
                             font.weight: Font.DemiBold
                         }
+
+                        // 8.7.1 (#53): a click drops the profile list. Under the pointer the
+                        // badge brightens and a small ▾ in its right padding says it opens.
+                        Text {
+                            anchors.right: parent.right
+                            anchors.rightMargin: stage._px(5)
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: profileBadge._hovered
+                            text: "▾"
+                            color: stage._onBg
+                            opacity: 0.8
+                            font.pixelSize: stage._px(14)
+                        }
+                        MouseArea {
+                            id: profileBadgeMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: stage.activated("profileList")
+                        }
                     }
 
                     Repeater {
                         model: stage._hasProfiles
-                               ? [{ btn: "RB", key: "E", kind: "nextProfile" }] : []
+                               ? [{ btn: "RT", key: "E", kind: "nextProfile" }] : []
                         delegate: Item {
                             anchors.verticalCenter: parent.verticalCenter
                             width: stage._px(40); height: stage._px(28)
@@ -962,6 +1084,7 @@ Item {
                                 buttonKey: modelData.btn
                                 keyLabel:  modelData.key
                                 size: stage._px(26)
+                                onDark: stage._hasPicture
                                 opacity: rbMouse.containsMouse ? 1.0 : 0.85
                             }
                             MouseArea {
@@ -1040,8 +1163,7 @@ Item {
                         radius: stage._px(7)
 
                         // Derived from the reading colour rather than from Theme, so these
-                        // follow the card's own light/dark flip along with the text. A fixed
-                        // line colour would vanish on a host carrying a light background.
+                        // follow the card's own light/dark flip along with the text (6.5.1).
                         color: Qt.rgba(stage._onBg.r, stage._onBg.g, stage._onBg.b, 0.07)
                         border.width: 1
                         border.color: Qt.rgba(stage._onBg.r, stage._onBg.g, stage._onBg.b, 0.26)
@@ -1114,11 +1236,11 @@ Item {
                     // sitting beside it: the switch it was promising is the one under way.
                     if (stage.linkChanging && stage.linkChangeText.length > 0)
                         f.push({ label: stage.linkChangeLabel, value: stage.linkChangeText,
-                                 colour: Theme.warning })
+                                 colour: stage._onBgWarning })
                     // Amber, and never green: this has not happened yet.
                     else if (stage.willSwitchLink)
                         f.push({ label: qsTr("On launch"), value: "→ " + stage.linkSwitchText,
-                                 colour: Theme.warning })
+                                 colour: stage._onBgWarning })
                     else if (stage.cantSwitchLink)
                         f.push({ label: qsTr("Link match"), value: qsTr("enable it in StreamTweak"),
                                  colour: stage._onBg3 })
@@ -1178,6 +1300,53 @@ Item {
             }
         }
 
+        // 8.0.0: why the focused button is greyed, on the line under the row — the plan's
+        // "motivo sulla riga sotto". Only a button that carries a reason (the StreamTweak mark
+        // today); with the mouse the same words are the button's tooltip.
+        Text {
+            anchors.left: actionRow.left
+            anchors.top: actionRow.bottom
+            anchors.topMargin: stage._px(6)
+            width: card.width - stage._px(38) * 2
+            elide: Text.ElideRight
+            visible: text.length > 0
+            text: {
+                if (!stage.zoneActive || stage.pointerMode) return ""
+                var i = stage.actionIndex
+                if (i < 0 || i >= stage.actions.length) return ""
+                var a = stage.actions[i]
+                return (a.disabled && a.reason !== undefined) ? a.reason : ""
+            }
+            color: stage._onBg3
+            font.family: Theme.family
+            font.pixelSize: stage._px(Theme.fontCaption)
+        }
+
+        // The StreamTweak button's name under the pointer, above it (the NEW badge sits right
+        // over it while that shows).
+        Rectangle {
+            x: actionRow.x + stage._markX
+            anchors.bottom: actionRow.top
+            anchors.bottomMargin: stage._px(30)
+            visible: stage._markHovered
+            width: markTip.implicitWidth + stage._px(20)
+            height: markTip.implicitHeight + stage._px(12)
+            radius: stage._px(8)
+            color: Theme.card
+            border.color: Theme.lineHigh
+            border.width: 1
+            Text {
+                id: markTip
+                anchors.centerIn: parent
+                text: stage.streamTweakReason.length > 0
+                      ? qsTr("StreamTweak · %1").arg(stage.streamTweakReason)
+                      : qsTr("StreamTweak")
+                color: Theme.text
+                font.family: Theme.family
+                font.pixelSize: stage._px(Theme.fontSmall)
+            }
+        }
+
         // ── The action row ───────────────────────────────────────────────────
         Row {
             id: actionRow
@@ -1209,12 +1378,31 @@ Item {
                     readonly property bool _focused:
                         stage.zoneActive && index === stage.actionIndex && !stage.pointerMode
                     readonly property bool _hovered: actionMouse.containsMouse && stage.pointerMode
-                    readonly property bool _lit: _focused || _hovered
 
                     height: stage._px(58)
-                    width: actionContent.implicitWidth + stage._px(54)
+                    // The mark is square at rest; with the focus it widens for the A beside it,
+                    // exactly as a word does.
+                    width: modelData.mark === true
+                           ? Math.max(height, actionContent.implicitWidth + stage._px(32))
+                           : actionContent.implicitWidth + stage._px(54)
                     radius: stage._px(10)
                     opacity: modelData.disabled ? 0.4 : 1.0
+
+                    Accessible.role: Accessible.Button
+                    Accessible.name: modelData.label
+                    on_HoveredChanged: if (modelData.mark === true) stage._markHovered = _hovered
+                    onXChanged: if (modelData.mark === true) stage._markX = x
+                    Component.onCompleted: if (modelData.mark === true) stage._markX = x
+
+                    // NEW above the button, centred, while this is the release that added it. On the
+                    // corner it sat half outside the button and vanished under the focus fill.
+                    NewBadge {
+                        onPicture: stage._hasPicture
+                        since: modelData.since !== undefined ? modelData.since : ""
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.top
+                        anchors.bottomMargin: stage._px(6)
+                    }
 
                     /*
                      * ── Colour, and only colour (5.7.0) ──────────────────────
@@ -1225,14 +1413,21 @@ Item {
                      * ⚠️ Fades, not a ring that expands past the button: an outline blooming
                      * outside its own edges reads as an alarm going off, and on a row of four
                      * it fires every time the stick is nudged.
+                     *
+                     * ⚠️ Glass when lit (05/11/2026, Marcello, variant A of docs/mockups/pulsanti):
+                     * the focus is the wash TINTED by the accent (26% over a picture, 22% on the
+                     * bare card) under a 2 px accent border, with the words staying in the
+                     * reading colour; the pointer only brightens the wash. Until then both filled
+                     * the button with the accent and turned the words dark.
                      */
-                    color: !_lit                ? "#14ffffff"
-                         : modelData.danger     ? Theme.danger
-                         :                        Theme.accent
+                    readonly property color _hue: modelData.danger
+                                                  ? (stage._hasPicture ? Theme.stageDanger : Theme.danger)
+                                                  : (stage._hasPicture ? Theme.accent : Theme.accentFill)
+                    color: _focused ? Qt.rgba(_hue.r, _hue.g, _hue.b, stage._hasPicture ? 0.26 : 0.22)
+                         : _hovered ? stage._washHigh
+                         :            stage._wash
                     border.width: _focused ? 2 : 1
-                    border.color: !_lit            ? Theme.lineHigh
-                                : modelData.danger ? Theme.danger
-                                :                    Theme.accent
+                    border.color: _focused ? _hue : stage._lineHigh
 
                     Behavior on color {
                         enabled: !Theme.reduceAnimations
@@ -1249,7 +1444,8 @@ Item {
                         enabled: !Theme.reduceAnimations
                         NumberAnimation { duration: 130; easing.type: Easing.OutBack; easing.overshoot: 2.2 }
                     }
-                    scale: _focused && !Theme.reduceAnimations ? 1.04 : 1.0
+                    // 7.0.0: a press dips it before it springs back.
+                    scale: Theme.reduceAnimations ? 1.0 : actionMouse.pressed ? 0.96 : _focused ? 1.04 : 1.0
 
                     Row {
                         id: actionContent
@@ -1277,7 +1473,7 @@ Item {
                             // resolved by SDL POSITION exactly like PadGlyph maps buttonKey
                             // "A": the south face button is ✕ on PlayStation and B on
                             // Nintendo, which swaps A/B against Xbox. `controllerType`
-                            // already returns the set forced in Settings → Session when
+                            // already returns the set forced in Settings → Interface when
                             // there is one, so the preference is not read a second time.
                             // Direct ternary rather than a helper call, for the same reason
                             // as PadGlyph._resolved: a function-call binding can fail to
@@ -1298,39 +1494,42 @@ Item {
                                             : Math.max(stage._px(26), actionBadgeText.implicitWidth + stage._px(14))
                             height: stage._px(26)
                             radius: _padMode ? width / 2 : stage._px(7)
-                            color: actionBtn._lit
-                                   ? (modelData.danger ? "#1a0505" : Theme.onAccent)
-                                   : "#26ffffff"
+                            color: stage._washHigh
 
                             Text {
                                 id: actionBadgeText
                                 anchors.centerIn: parent
                                 text: actionBadge._letter
-                                color: actionBtn._lit
-                                       ? (modelData.danger ? Theme.danger : Theme.accent)
-                                       : stage._onBg
+                                color: stage._onBg
                                 font.family: Theme.family
                                 font.pixelSize: stage._px(Theme.fontSmall)
                                 font.weight: Font.Bold
                             }
                         }
 
+                        // 8.0.0: StreamTweak's own logo, in its colours — the same mark as its tab
+                        // in Settings. Greyed with the button (its opacity), never recoloured.
+                        Image {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: modelData.mark === true
+                            width: stage._px(42)
+                            height: stage._px(42)
+                            source: modelData.mark === true ? "qrc:/res/streamtweak_logo.png" : ""
+                            sourceSize.width: 128
+                            sourceSize.height: 128
+                            fillMode: Image.PreserveAspectFit
+                            smooth: true
+                            mipmap: true
+                        }
+
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
+                            visible: modelData.mark !== true
                             text: modelData.label
-                            color: actionBtn._lit
-                                   ? (modelData.danger ? "#1a0505" : Theme.onAccent)
-                                   : Theme.text
+                            color: stage._onBg
                             font.family: Theme.family
                             font.pixelSize: stage._px(Theme.fontTitle)
-                            font.weight: actionBtn._lit ? Font.Bold : Font.Normal
-
-                            // Crossed over with the fill behind it, or the label would flip
-                            // to dark ink a frame before the accent is there to sit on.
-                            Behavior on color {
-                                enabled: !Theme.reduceAnimations
-                                ColorAnimation { duration: 140; easing.type: Easing.OutCubic }
-                            }
+                            font.weight: actionBtn._focused ? Font.Bold : Font.Normal
                         }
                     }
 
@@ -1378,15 +1577,17 @@ Item {
      * ⚠️ 6.0.0: a child of the STAGE now, not of the card — the card became the left part of
      * the stage (see _cardW) and this block stands on the floor beside it. Every number below
      * is the one it had inside the full-width card, and `parent` still means an item whose
-     * right and top edges are where that card's were, so the block sits exactly where it did.
+     * top edge is where that card's was. Across, it is centred in the floor beside the card.
      */
     GameFacts {
         id: lastPanel
         visible: stage._hasPanel
         u: stage._u
 
-        anchors.right: parent.right
-        anchors.rightMargin: stage._px(46)
+        // ⚠️ 7.0.0: centred in the floor right of the card. It kept the right margin it had
+        // inside the full-width card (46 px from the stage's edge), which since the card shrank
+        // to 55% left it well right of the middle of the space it stands in.
+        x: card.width + (parent.width - card.width - width) / 2
         anchors.top: parent.top
         anchors.topMargin: stage._px(30)
         width: stage._px(380)
@@ -1468,9 +1669,9 @@ Item {
      */
     Rectangle {
         id: panelActionBtn
-        // The same condition the focus chain uses, read from one place: written out twice
-        // it would eventually be true for the pad and false for the eye.
-        visible: stage._panelActionReachable
+        // Drawn whenever the block is; reachable by the pad only when it can act
+        // (_panelActionReachable) — a last game gone from the host shows it greyed out.
+        visible: stage._hasPanel
 
         anchors.horizontalCenter: lastPanel.horizontalCenter
         // On the line of the action row, as before. It can no longer ANCHOR there: since 6.0.0
@@ -1481,7 +1682,6 @@ Item {
         readonly property bool _focused:
             stage.zoneActive && stage.actionIndex === stage.actions.length && !stage.pointerMode
         readonly property bool _hovered: panelActionMouse.containsMouse && stage.pointerMode
-        readonly property bool _lit: _focused || _hovered
 
         height: stage._px(58)
         width: panelActionRow.implicitWidth + stage._px(54)
@@ -1498,10 +1698,18 @@ Item {
             NumberAnimation { duration: 160 }
         }
 
-        color: _lit ? Theme.accent : "#14ffffff"
+        // 6.5.1's wash and hairline, like the card's own buttons — in the theme's colours, since
+        // this one stands on the app's floor and never on the picture.
+        //
+        // ⚠️ Glass when lit too (05/11/2026, Marcello, variant A of docs/mockups/pulsanti): the
+        // focus is the same wash TINTED by the accent (22%) under a 2 px accent border, the
+        // pointer only brightens the wash. It used to fill with the accent like the action row
+        // — that row keeps its fill, by decision; every other button in the app is glass.
+        color: _focused ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.22)
+             : _hovered ? Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.15)
+             :            Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
         border.width: _focused ? 2 : 1
-        border.color: _lit ? Theme.accent : Theme.lineHigh
-
+        border.color: _focused ? Theme.accentFill : Theme.lineHigh
         Behavior on color {
             enabled: !Theme.reduceAnimations
             ColorAnimation { duration: 140; easing.type: Easing.OutCubic }
@@ -1541,7 +1749,7 @@ Item {
                                 : Math.max(stage._px(26), playBadgeText.implicitWidth + stage._px(14))
                 height: stage._px(26)
                 radius: _padMode ? width / 2 : stage._px(7)
-                color: panelActionBtn._lit ? Theme.onAccent : "#26ffffff"
+                color: Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.15)
 
                 Text {
                     id: playBadgeText
@@ -1549,7 +1757,7 @@ Item {
                     text: playBadge._letter
                     // Theme.text, not the card's reading colour (_onBg): this button stands on
                     // the app's floor now, not on the host's backdrop.
-                    color: panelActionBtn._lit ? Theme.accent : Theme.text
+                    color: Theme.text
                     font.family: Theme.family
                     font.pixelSize: stage._px(Theme.fontSmall)
                     font.weight: Font.Bold
@@ -1559,10 +1767,10 @@ Item {
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: stage._hasRunning ? qsTr("Resume") : qsTr("Play again")
-                color: panelActionBtn._lit ? Theme.onAccent : Theme.text
+                color: Theme.text
                 font.family: Theme.family
                 font.pixelSize: stage._px(Theme.fontTitle)
-                font.weight: panelActionBtn._lit ? Font.Bold : Font.Normal
+                font.weight: panelActionBtn._focused ? Font.Bold : Font.Normal
 
                 Behavior on color {
                     enabled: !Theme.reduceAnimations
@@ -1633,6 +1841,8 @@ Item {
         Text {
             id: hintText
             anchors.horizontalCenter: parent.horizontalCenter
+            // Plain text: a name from the host, never markup (8.5.0, security review).
+            textFormat: Text.PlainText
             text: qsTr("Your last game on %1 will show up here").arg(stage.hostName)
             // A long host name wraps within the block's width instead of running off the edge.
             width: Math.min(implicitWidth, lastPanel.width)

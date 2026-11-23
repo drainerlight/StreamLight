@@ -9,6 +9,7 @@ import ComputerManager 1.0
 import StreamingPreferences 1.0
 import SdlGamepadKeyNavigation 1.0
 import WindowMove 1.0
+import InputHints 1.0
 
 /*
  * The host page — the showcase.
@@ -22,6 +23,12 @@ import WindowMove 1.0
  * store a game comes from in words rather than a 16px badge, whether it is running right
  * now, whether it carries settings of its own, and the right verb on the button — Resume
  * for a session already up, Play for one that isn't.
+ *
+ * 8.1.0 (PR #46, @Noklef): the grid of covers is back as a second layout, chosen by the user
+ * (left-stick click, V, the status-bar prompt or Settings → Interface). The list above stays
+ * the default for the reasons just given; the grid is for who would rather browse by cover.
+ * Both share the model, the delegate and the session actions, so launch, resume and quit
+ * take the same path in either; in the grid the spotlight's buttons move to the status bar.
  *
  * Root is FocusScope (not Item) — required for activeFocus propagation from the Loader
  * above us down into the two zones. Plain Items do not propagate.
@@ -69,9 +76,6 @@ FocusScope {
     readonly property bool _effHdr:     (hostOverride && hostOverride.hdr     !== undefined) ? hostOverride.hdr     : StreamingPreferences.enableHdr
     readonly property int  _effCodec:   (hostOverride && hostOverride.codec   !== undefined) ? hostOverride.codec   : StreamingPreferences.videoCodecConfig
     readonly property int  _effAudio:   (hostOverride && hostOverride.audio   !== undefined) ? hostOverride.audio   : StreamingPreferences.audioConfig
-    // Frame pacing does nothing without V-Sync, and the per-game dialog offers frame
-    // pacing but not V-Sync — so it has to be told the effective value to grey against.
-    readonly property bool _effVsync:   (hostOverride && hostOverride.vsync   !== undefined) ? hostOverride.vsync === true : StreamingPreferences.enableVsync
 
     function _codecLabel(c) { return c === 1 ? "H.264" : c === 2 ? "HEVC" : c === 4 ? "AV1" : c === 5 ? "PyroWave" : qsTr("Auto codec") }
     function _audioLabel(a) { return a === 1 ? "5.1" : a === 2 ? "7.1" : qsTr("Stereo") }
@@ -89,8 +93,41 @@ FocusScope {
     // Same reference and the same reasoning as HostStage — see the note there. Both screens
     // must use the same divisor or a host and its games would be drawn at two different
     // sizes, which is the one thing a shared grammar cannot survive.
-    readonly property real _u: Math.max(0.62, Math.min(1.60, width / 1330))
+    // Times the user's Interface scale (7.0.0), like Theme.uiScale for the dialogs.
+    readonly property real _u: Math.max(0.62, Math.min(1.60, width / 1330, Theme.heightFit)) * Theme.scaleFactor
+
+    // The grey text of this page: the theme's text2/text3 on the floor and its waves. In Light
+    // on the lifted cover (Host page background = Game cover) both are one darker grey, #26323a:
+    // the cover's darkest spots there bring text2 down to ~3.1:1, and this holds 4.6:1 at worst
+    // while still reading lighter than the titles (see CoverAmbient.lifted).
+    readonly property bool  _coverGrey: Theme.light && coverDrawing
+    readonly property color _text2: _coverGrey ? "#26323a" : Theme.text2
+    readonly property color _text3: _coverGrey ? "#26323a" : Theme.text3
     function _px(n) { return Math.round(n * _u) }
+
+    // The active view changes; both views share the same AppModel and delegate.
+    readonly property bool gridLayout: Theme.libraryGrid
+    readonly property var appGrid: gridLayout ? coverGrid : appList
+    readonly property string layoutActionLabel: gridLayout ? qsTr("List layout") : qsTr("Grid layout")
+
+    // Both views must be complete before initialization scrolls or focuses either one.
+    Component.onCompleted: appList.initializeLibrary()
+
+    function toggleLibraryLayout() {
+        var selectedId = appGrid && appGrid.currentItem ? appGrid.currentItem._appId : -1
+        var selectedIndex = appGrid ? appGrid.currentIndex : 0
+        Theme.libraryGrid = !gridLayout
+        var view = appGrid
+        var index = selectedId >= 0 ? view.appModel.indexOfAppId(selectedId) : selectedIndex
+        view.currentIndex = view.count > 0 ? Math.max(0, Math.min(index, view.count - 1)) : -1
+        appsRoot._playtimeEpoch++
+        // Geometry and the new current delegate must settle before scrolling and focusing.
+        Qt.callLater(function() {
+            if (view !== appsRoot.appGrid) return
+            if (view.currentIndex >= 0) view.positionViewAtIndex(view.currentIndex, GridView.Contain)
+            appsRoot.focusLibrary()
+        })
+    }
 
     // ── The two columns ──────────────────────────────────────────────────────
     /*
@@ -121,7 +158,7 @@ FocusScope {
      * four actions and only Shutdown has a button of its own, so there the second zone is
      * the only way to reach the other three and it stays.
      */
-    function focusLibrary() { appGrid.forceActiveFocus() }
+    function focusLibrary() { if (appGrid) appGrid.forceActiveFocus() }
 
     // The host went away while a launch screen was up. Deferred rather than dropped: see
     // computerLost().
@@ -227,6 +264,33 @@ FocusScope {
         if (Window.window) Window.window.markStreamLaunching()
         stackView.push(segue)
     }
+
+    /*
+     * A new launch (nothing running on the host): HomeScreen asks first whether the host is
+     * locked and puts the PIN pad in front of the launch if so (7.0.0, #35) — see
+     * HomeScreen.launchWhenUnlocked(). The launch may therefore run seconds from now, after a
+     * Desktop session has come and gone, so the row is found again by id at that moment.
+     *
+     * ⚠️ Built here and not in the delegate, for the reason written in launchSegue(): a closure
+     * carries the context it was written in, and the delegate can be recreated while the pad
+     * is up — the host reporting the Desktop as running re-sorts the list.
+     */
+    function launchNew(name, art, appId) {
+        var run = function () {
+            var m = appGrid.appModel
+            var i = m ? m.indexOfAppId(appId) : -1
+            if (i < 0) {
+                console.warn("[launch] " + name + " is no longer on this host")
+                return
+            }
+            appsRoot.launchSegue(name, art, m.createSessionForApp(i), false, appId)
+        }
+        if (appShell) appShell.launchWhenUnlocked(computerIndex, hostName, run, "apps")
+        else          run()
+    }
+
+    // Leaving the page while an unlock settles: the launch it was for must not follow.
+    Component.onDestruction: if (appShell) appShell.dropLaunchWhenUnlocked("apps")
 
     // ── Pad glyphs ───────────────────────────────────────────────────────────
     // Resolved exactly as the status bar does, by SDL button POSITION — Nintendo swaps A/B
@@ -344,6 +408,16 @@ FocusScope {
 
     function setLibraryTab(tab, byUser) {
         if (!appGrid || !appGrid.appModel) return
+        // Search is a stop on the ring, not a tab: it is never saved, and it keeps state of its
+        // own that a plain switch would leave behind (see enterSearch / exitSearch).
+        if (tab === "search") {
+            if (!searching) enterSearch(false)
+            return
+        }
+        if (searching) {
+            exitSearch(tab, false, byUser)
+            return
+        }
         if (byUser) {
             _tabChosenByUser = true
             appGrid.appModel.saveTab(tab)
@@ -358,10 +432,164 @@ FocusScope {
     }
 
     // LB/RB, one step left or right. The ring wraps, like the tabs of Settings (SectionTabBar).
+    // It is _ring, not _tabs: search is one of its stops.
     function switchLibraryTab(dir) {
-        var n = _tabs.length
-        var i = (_tabs.indexOf(libraryTab) + (dir < 0 ? -1 : 1) + n) % n
-        setLibraryTab(_tabs[i], true)
+        var n = _ring.length
+        var i = (_ring.indexOf(libraryTab) + (dir < 0 ? -1 : 1) + n) % n
+        setLibraryTab(_ring[i], true)
+    }
+
+    // ── Search (8.4.0) ───────────────────────────────────────────────────────
+    /*
+     * Text search over the library, in both layouts. A stop at the front of the tab ring —
+     * [LB] 🔍 ALL GAMES APPS [RB] — so LB from ALL, the tab the page opens on, is search, and
+     * no button had to change meaning to make room for it. On the keyboard: '/' or Ctrl+F.
+     *
+     * It searches what ALL shows, never the 2.0 host controls: ALL's rule, and the running-game
+     * copy a 2.0 server sends carries the game's own title, which would turn up twice.
+     *
+     * The filter lives in the model (AppModel.setFilterText), so every row index the page
+     * hands back to it still means the same row. The counts ignore it — see onCountsChanged.
+     *
+     * ⚠️ _tabs stays the three real tabs. The saved tab, the opening tab, the direct-launch scan
+     * and _selectAppIdAnyTab all walk it, and none of them may ever land on search.
+     */
+    readonly property var _ring: ["search", "all", "games", "apps"]
+    readonly property bool searching: libraryTab === "search"
+    // The on-screen keyboard is up (controller typing). Only ever while searching.
+    readonly property bool searchKeyboardOpen: searchKeyboard.visible
+    // Typing in the field: the status bar names the field's keys, not the selected entry's,
+    // which would type letters here (G, S, V, P).
+    readonly property bool searchTyping: searching && searchField.activeFocus
+    readonly property bool searchHasText: searchField.text.length > 0
+    // Where B leaves search to.
+    property string _tabBeforeSearch: "all"
+
+    function enterSearch(withKeyboard) {
+        if (!appGrid || !appGrid.appModel) return
+        if (!searching) {
+            _tabBeforeSearch = libraryTab
+            libraryTab = "search"
+            appGrid.appModel.category = "all"
+            appGrid.currentIndex = appGrid.count > 0 ? 0 : -1
+            appGrid.positionViewAtBeginning()
+            appGrid.updateContinue()
+            appsRoot._playtimeEpoch++
+        }
+        if (withKeyboard) openKeyboard()
+        else {
+            closeKeyboard()
+            searchField.forceActiveFocus()
+        }
+    }
+
+    /// Leaves search for a tab. keepSelection: the cursor stays on the entry it was on, where
+    /// that tab has it — B after finding a game lands on it. byUser: the tab is remembered,
+    /// as a choice made with LB/RB is.
+    function exitSearch(toTab, keepSelection, byUser) {
+        if (!searching) return
+        var m = appGrid.appModel
+        var appId = keepSelection && appGrid.currentItem ? appGrid.currentItem._appId : -1
+        closeKeyboard()
+        // Emptying the field restarts the debounce (onTextChanged), so it stops after.
+        searchField.text = ""
+        searchDebounce.stop()
+        m.setFilterText("")
+        if (byUser) {
+            _tabChosenByUser = true
+            m.saveTab(toTab)
+        }
+        libraryTab = toTab
+        m.category = toTab
+        var i = appId >= 0 ? m.indexOfAppId(appId) : -1
+        appGrid.currentIndex = i >= 0 ? i : (appGrid.count > 0 ? 0 : -1)
+        if (i >= 0) appGrid.positionViewAtIndex(i, ListView.Contain)
+        else appGrid.positionViewAtBeginning()
+        appGrid.updateContinue()
+        appsRoot._playtimeEpoch++
+        focusLibrary()
+    }
+
+    /// The field's text, applied. A no-op unless the words changed (AppModel.setFilterText);
+    /// when they did the rows were rebuilt, so the cursor goes back to the first result.
+    function _applyQuery() {
+        if (!searching || !appGrid || !appGrid.appModel) return
+        if (!appGrid.appModel.setFilterText(searchField.text)) return
+        appGrid.currentIndex = appGrid.count > 0 ? 0 : -1
+        appGrid.positionViewAtBeginning()
+        appGrid.updateContinue()
+        appsRoot._playtimeEpoch++
+    }
+
+    /*
+     * The on-screen keyboard is the app's own (VirtualKeyboard.qml, 8.0.0), searchKeyboard
+     * below, as on every other field a pad types into. It is modal: while it is up the focus
+     * and every pad button are its own — A types, X deletes, Y adds a space, LB/RB move the
+     * text cursor, LT shift, RT symbols, Start is Done (the results), B closes it back to the
+     * field. The pad's A in the field opens it (offer(), in the field's keys); so does the ⌨
+     * button, for the mouse.
+     */
+    function openKeyboard() {
+        searchField.forceActiveFocus()
+        searchKeyboard.open()
+    }
+    function closeKeyboard() { searchKeyboard.close() }
+
+    /// Back into the search from the results. The field, with the pad too: A there opens the
+    /// keyboard, so walking up through the search bar never covers the results with it.
+    function focusSearch() {
+        closeKeyboard()
+        searchField.forceActiveFocus()
+    }
+
+    /// From the search to the results — Down or Enter in the field, Start or Done on the
+    /// keyboard. With nothing to show, the field keeps the focus.
+    function showResults() {
+        // Every Results action, including the clickable prompt, uses the latest text.
+        searchDebounce.stop()
+        _applyQuery()
+        closeKeyboard()
+        if (appGrid.count === 0) {
+            searchField.forceActiveFocus()
+            return
+        }
+        if (appGrid.currentIndex < 0) appGrid.currentIndex = 0
+        focusLibrary()
+    }
+
+    // X in the field: delete, as on the keyboard.
+    function searchBackspace() {
+        var p = searchField.cursorPosition
+        if (p > 0) searchField.remove(p - 1, p)
+    }
+
+    /// B, Escape and the B prompt, through AppShell._goBack(): the keyboard closes first (back
+    /// to the field, as its own B does), then the text being typed is cleared, then the search
+    /// closes, back to the tab it was opened from. False when there is nothing to undo here and
+    /// B should leave the page.
+    function backOut() {
+        if (searchKeyboardOpen) {
+            closeKeyboard()
+            return true
+        }
+        // Escape in the field does this itself; this is the clickable B prompt's way there.
+        if (searchTyping && searchField.text.length > 0) {
+            searchField.clear()
+            return true
+        }
+        if (searching) {
+            exitSearch(_tabBeforeSearch, true, false)
+            return true
+        }
+        return false
+    }
+
+    // Typing waits for a pause rather than filtering on every key: each change of words is a
+    // model reset, and a fast typist would otherwise rebuild the library once per letter.
+    Timer {
+        id: searchDebounce
+        interval: 150
+        onTriggered: appsRoot._applyQuery()
     }
 
     // ── GAMES / APPS by hand (6.1.0) ─────────────────────────────────────────
@@ -371,8 +599,9 @@ FocusScope {
      * where both halves are shown together and "the other tab" means nothing, and never for
      * a host control — those are not applications and stay on APPS.
      */
+    // GAMES and APPS only: search shows ALL's rows, where "the other tab" means nothing either.
     readonly property bool focusedMovable:
-        libraryTab !== "all" && appGrid && appGrid.currentItem
+        (libraryTab === "games" || libraryTab === "apps") && appGrid && appGrid.currentItem
         ? appGrid.currentItem._movable === true : false
     // Read by the status bar, beside the right-stick prompt.
     readonly property string focusedMoveLabel:
@@ -412,6 +641,16 @@ FocusScope {
     /// Selects the entry with this id on whichever tab has it, the current one first. False
     /// when no tab does.
     function _selectAppIdAnyTab(appId) {
+        // Among the results if it is there. If not, the search gives way to the tabs: it is
+        // not one of them, and a host's confirmation must still find its entry.
+        if (searching) {
+            var r = appGrid.appModel.indexOfAppId(appId)
+            if (r >= 0) {
+                appGrid.currentIndex = r
+                return true
+            }
+            exitSearch(_tabBeforeSearch, false, false)
+        }
         var order = [libraryTab].concat(_tabs.filter(function(t) { return t !== libraryTab }))
         for (var k = 0; k < order.length; ++k) {
             setLibraryTab(order[k], false)
@@ -432,6 +671,9 @@ FocusScope {
         target: (appGrid && appGrid.appModel) ? appGrid.appModel : null
         function onCountsChanged() {
             var m = appGrid.appModel
+            // A search stays put. It is the user's own doing, and the fallbacks below would end
+            // it; a Remote Monitor kept mid-search just leaves it with fewer results.
+            if (appsRoot.searching) return
             if (!appsRoot._tabChosenByUser) {
                 appsRoot._pickOpeningTab()
             } else if (m.remoteMonitorActive && appsRoot.libraryTab !== "apps") {
@@ -492,6 +734,9 @@ FocusScope {
         } else if (event.key === Qt.Key_X && focusedAppIsRunning) {
             stopFocusedApp()
             event.accepted = true
+        } else if (event.key === Qt.Key_F20 || event.key === Qt.Key_V) {
+            if (!event.isAutoRepeat) toggleLibraryLayout()
+            event.accepted = true
         }
         /*
          * ⚠️ The shoulders and the triggers are handled here and not in AppShell even though
@@ -526,6 +771,13 @@ FocusScope {
             event.accepted = true
         } else if (event.key === Qt.Key_F15 || event.key === Qt.Key_E) {
             cycleProfile(1)
+            event.accepted = true
+        }
+        // Search (8.4.0): '/', as in browsers and launchers, and the platform's Find (Ctrl+F).
+        // Any modifiers on '/': on several layouts it needs Shift. Typing either into the
+        // search field never gets here — the field takes printable keys first.
+        else if (event.key === Qt.Key_Slash || event.matches(StandardKey.Find)) {
+            enterSearch(false)
             event.accepted = true
         }
     }
@@ -573,8 +825,6 @@ FocusScope {
         appSettingsDialog.cover = appsRoot.focusedBoxArt
         // So the per-game "inherit" option shows the active profile's name.
         appSettingsDialog.activeProfileName = appsRoot.hostProfileName
-        appSettingsDialog.effectiveVsync = appsRoot._effVsync
-        appSettingsDialog.inheritedCodec = appsRoot._effCodec
         appSettingsDialog.open()
     }
     function openCustomizeForFocused() {
@@ -600,37 +850,6 @@ FocusScope {
             return (gbps === Math.floor(gbps) ? gbps.toFixed(0) : gbps.toFixed(1)) + " Gbps"
         }
         return mbps + " Mbps"
-    }
-
-    /*
-     * This page paints its own floor when it has artwork to paint it with — the blurred cover
-     * under a veil that reaches full opacity at the bottom — so the shell's status bar has to
-     * sit on the same near-black instead of on the shell's accent-tinted gradient, or there is
-     * a visible step across the foot of the screen.
-     *
-     * ⚠️ It has to follow whether the artwork is actually there, not just be set once. Without
-     * a cover, or with reduced animations, this page falls back to the shell's gradient and a
-     * hardcoded near-black bar produced that same step the other way round.
-     *
-     * ⚠️ On `appShellChanged`, NOT on `Component.onCompleted`: the Loader assigns `appShell`
-     * after the item is constructed, so at completion it is still null and the assignment is
-     * silently skipped — which is why the bar once kept the shell's lighter gradient.
-     *
-     * ⚠️ And restored explicitly on the way out. This was briefly a `Binding`, on the
-     * assumption that it would put the old value back when the page went away. It does not,
-     * and the shell outlives the page — so the near-black leaked onto Home and every other
-     * screen, which is the whole reason this property defaults to transparent.
-     */
-    function _syncStatusBarFloor() {
-        if (appShell) appShell.statusBarFloor = ambient.drawing ? "#05080a" : "transparent"
-    }
-
-    onAppShellChanged:       _syncStatusBarFloor()
-    Component.onDestruction: if (appShell) appShell.statusBarFloor = "transparent"
-
-    Connections {
-        target: ambient
-        function onDrawingChanged() { appsRoot._syncStatusBarFloor() }
     }
 
     // Loader sets host properties AFTER Component.onCompleted → init here.
@@ -739,18 +958,41 @@ FocusScope {
         }
     }
 
-    // Ambient backdrop — the focused cover, blurred, behind everything.
-    //
-    // Lives in CoverAmbient so that the launch and quit screens can stand on the same
-    // artwork rather than on their own imitation of it. The crossfade on focus changes
-    // moved in there with it.
+    // The spotlight follows the selection with a short rise and fade (7.0.0) instead of
+    // swapping in place.
+    onFocusedBoxArtChanged: {
+        if (Theme.reduceAnimations) return
+        heroShift.y = appsRoot._px(10)
+        heroStack.opacity = 0.35
+        heroIn.restart()
+    }
+    ParallelAnimation {
+        id: heroIn
+        NumberAnimation { target: heroShift; property: "y"; to: 0; duration: 180; easing.type: Easing.OutCubic }
+        NumberAnimation { target: heroStack; property: "opacity"; to: 1; duration: 150; easing.type: Easing.OutCubic }
+    }
+
+    /*
+     * The page's background is the user's choice (13/10/2026): by default none of its own — it
+     * stands on the app's floor and its waves, as Home does (7.0.0, 09/10/2026), drawn by
+     * AppShell — or, with Settings → Interface → Host page background = Game cover, the focused
+     * game's cover blurred behind everything, as in 6.5.1 (CoverAmbient, lifted in Light).
+     * AppShell reads coverDrawing to stop the waves under it and give the status bar its foot.
+     */
     CoverAmbient {
         id: ambient
         z: -2
-        source: appsRoot.focusedBoxArt
+        visible: Theme.hostPageCovers
+        source: Theme.hostPageCovers ? appsRoot.focusedBoxArt : ""
         overscan: appsRoot._px(60)
+        lifted: Theme.light
+        // More of the picture in Light, where the lift already keeps it pale (see lifted).
+        artOpacity: Theme.light ? 0.8 : 0.5
     }
-
+    // ⚠️ Read by AppShell (waves off, status bar foot). False when the option is off, and when
+    // the cover cannot draw — no artwork, or Reduce animations — so the waves come back then.
+    readonly property bool  coverDrawing: Theme.hostPageCovers && ambient.drawing
+    readonly property color coverFoot: ambient.footColor
 
     // ═════════════════════════════════════════════════════════════════════════
     // Header
@@ -786,6 +1028,8 @@ FocusScope {
 
             Label {
                 anchors.verticalCenter: parent.verticalCenter
+                // Plain text: a name from the host, never markup (8.5.0, security review).
+                textFormat: Text.PlainText
                 text: appsRoot.hostName
                 color: Theme.text
                 font.family: Theme.family
@@ -828,7 +1072,7 @@ FocusScope {
                     if (appsRoot._hasProfiles)
                         c.push({ text: appsRoot.hostProfileSlot >= 0 && appsRoot.hostProfileName.length > 0
                                        ? appsRoot.hostProfileName : qsTr("Global"),
-                                 dot: Theme.accent, kind: "profile" })
+                                 dot: Theme.ink, kind: "profile" })
                     if (appsRoot.isTailscaleClone)
                         c.push({ text: qsTr("Tailscale"), dot: Theme.text2 })
                     // ⚠️ Same words as the host card on Home, in the same order of precedence.
@@ -871,6 +1115,9 @@ FocusScope {
                         height: appsRoot._px(26)
                         width: chipRow.implicitWidth + appsRoot._px(26)
                         radius: appsRoot._px(6)
+                        // As the status chips on Home (HostStage's chipBox): no fill, a hairline
+                        // (14/10/2026). It stood on a Plate from 09/10, which made these the
+                        // only status chips in the app with a body.
                         color: "transparent"
                         border.color: Theme.line
                         border.width: 1
@@ -889,7 +1136,7 @@ FocusScope {
                             Label {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: modelData.text.toUpperCase()
-                                color: modelData.fg !== undefined ? modelData.fg : Theme.text2
+                                color: modelData.fg !== undefined ? modelData.fg : appsRoot._text2
                                 font.family: Theme.family
                                 font.pixelSize: appsRoot._px(Theme.fontSmall)
                                 font.weight: Font.DemiBold
@@ -979,9 +1226,10 @@ FocusScope {
                 width: _isSep ? appsRoot._px(13)
                               : cfgText.implicitWidth + appsRoot._px(_isGrp ? 4 : 26)
                 radius: (_isGrp || _isSep) ? 0 : appsRoot._px(7)
-                color: (_isGrp || _isSep) ? "transparent" : "#0affffff"
-                border.width: (_isGrp || _isSep) ? 0 : 1
-                border.color: Theme.lineHigh
+                color: "transparent"
+                // On a Plate like the badges on Home (09/10/2026; the same wash since 14/10);
+                // captions and rules stay flat.
+                Plate { visible: !cfgChip._isGrp && !cfgChip._isSep; anchors.fill: parent; radius: parent.radius }
 
                 // A hairline, centred in its own slot, rather than the delegate itself being
                 // one pixel wide — that way the gap on either side comes from the rule and
@@ -999,7 +1247,7 @@ FocusScope {
                     anchors.centerIn: parent
                     visible: !cfgChip._isSep
                     text: cfgChip._isGrp ? String(modelData.text).toUpperCase() : String(modelData.text)
-                    color: cfgChip._isGrp ? Theme.text3 : Theme.text
+                    color: cfgChip._isGrp ? appsRoot._text3 : Theme.text
                     font.family: Theme.family
                     font.pixelSize: appsRoot._px(Theme.fontSmall)
                     font.weight: cfgChip._isGrp ? Font.Normal : Font.DemiBold
@@ -1033,12 +1281,14 @@ FocusScope {
         anchors.bottomMargin: appsRoot._px(58)
         width: appsRoot.width - appsRoot._sideMargin * 2
                - appsRoot._colGap - appsRoot._libraryWidth
-        visible: appGrid.count > 0
+        visible: !appsRoot.gridLayout && appGrid.count > 0
 
         // Cover, name, meta, figures and actions as one centred stack. The column is what
         // the library leaves, so everything in it is laid out from the centre outwards.
         Column {
             id: heroStack
+            // The spotlight changes game with a small rise and fade (7.0.0) — see heroIn.
+            transform: Translate { id: heroShift }
             anchors.centerIn: parent
             width: parent.width
             spacing: 0
@@ -1078,7 +1328,9 @@ FocusScope {
                     if (appsRoot.focusedOverridden)   parts.push(qsTr("custom settings"))
                     return parts.join("  ·  ")
                 }
-                metaColor: appsRoot.focusedAppIsRunning ? Theme.online : Theme.text2
+                metaColor: appsRoot.focusedAppIsRunning ? Theme.online : appsRoot._text2
+                tone2: appsRoot._text2
+                tone3: appsRoot._text3
                 played: appsRoot.focusedPlaytime
                 sessions: appsRoot.focusedSessions
             }
@@ -1145,17 +1397,14 @@ FocusScope {
                             width: heroBtnRow.implicitWidth + appsRoot._px(26)
                             radius: appsRoot._px(9)
 
-                            color: _hovered ? "#1fffffff" : "#0dffffff"
-                            border.width: 1
-                            border.color: _hovered ? Theme.accent : Theme.lineHigh
-
-                            Behavior on color {
-                                enabled: !Theme.reduceAnimations
-                                ColorAnimation { duration: 140 }
-                            }
-                            Behavior on border.color {
-                                enabled: !Theme.reduceAnimations
-                                ColorAnimation { duration: 140 }
+                            // On a Plate like the card's buttons on Home (09/10/2026; the same
+                            // wash since 14/10); the pointer brightens the wash (05/11/2026 —
+                            // it was an ink outline, the one hover in the app drawn that way).
+                            color: "transparent"
+                            Plate {
+                                anchors.fill: parent; radius: parent.radius
+                                button: true
+                                hovered: heroBtn._hovered
                             }
 
                             Row {
@@ -1204,13 +1453,14 @@ FocusScope {
     // The library — the only zone
     // ═════════════════════════════════════════════════════════════════════════
     /*
-     * A vertical list of titles, not a wall of covers.
+     * A vertical list of titles, not a wall of covers — by default.
      *
      * The cover already has a place — the spotlight above, at a size worth looking at — so
      * repeating it forty times small was showing the same thing twice and reading neither
      * well. A list gives every game its name in full, which a 200px cover cannot, and one
      * axis to move along instead of two: on a pad that is the difference between arriving at
-     * a game and hunting for it.
+     * a game and hunting for it. The grid (coverGrid, 8.1.0) is there for who prefers it;
+     * the tabs and their filtering serve both views.
      */
     // The tabs over the library (5.9.0; ALL since 6.1.0). Clickable for the mouse. LB/RB sit at
     // the two ends (6.1.0 — they were LT/RT, named in the status bar), the way the dialogs'
@@ -1228,14 +1478,19 @@ FocusScope {
             anchors.verticalCenterOffset: -appsRoot._px(5)   // centred on the labels, not the underline
             size: appsRoot._px(26)
             buttonKey: "LB"; keyLabel: "PgUp"
-            onTriggered: { appsRoot.switchLibraryTab(-1); appsRoot.focusLibrary() }
+            onTriggered: {
+                appsRoot.switchLibraryTab(-1)
+                if (!appsRoot.searching) appsRoot.focusLibrary()
+            }
         }
 
         Row {
         spacing: appsRoot._px(26)
 
         Repeater {
+            // Search (8.4.0) is the first stop, drawn as a magnifier rather than a word.
             model: [
+                { tab: "search", label: "" },
                 { tab: "all",   label: qsTr("ALL") },
                 { tab: "games", label: qsTr("GAMES") },
                 { tab: "apps",  label: qsTr("APPS") }
@@ -1244,16 +1499,38 @@ FocusScope {
             delegate: Item {
                 id: tabItem
                 readonly property bool _on: appsRoot.libraryTab === modelData.tab
+                readonly property bool _isSearch: modelData.tab === "search"
                 implicitWidth: tabRow.implicitWidth
                 implicitHeight: tabRow.implicitHeight + appsRoot._px(10)
+                Accessible.role: Accessible.PageTab
+                Accessible.name: _isSearch ? qsTr("Search") : modelData.label
 
                 Row {
                     id: tabRow
                     spacing: appsRoot._px(8)
 
+                    // The label's height, so the underline sits where the others' does.
+                    Item {
+                        visible: tabItem._isSearch
+                        width: appsRoot._px(18)
+                        height: tabLabel.implicitHeight
+                        Image {
+                            anchors.centerIn: parent
+                            width: appsRoot._px(18)
+                            height: width
+                            source: Theme.light ? "qrc:/res/search_dark.svg" : "qrc:/res/search.svg"
+                            sourceSize.width: width * Screen.devicePixelRatio
+                            sourceSize.height: height * Screen.devicePixelRatio
+                            smooth: true
+                            opacity: tabItem._on ? 1.0 : 0.55
+                        }
+                    }
+
                     Label {
+                        id: tabLabel
+                        visible: !tabItem._isSearch
                         text: modelData.label
-                        color: tabItem._on ? Theme.text : Theme.text3
+                        color: tabItem._on ? Theme.text : appsRoot._text3
                         font.family: Theme.family
                         font.pixelSize: appsRoot._px(Theme.fontBody)
                         font.weight: tabItem._on ? Font.DemiBold : Font.Normal
@@ -1270,7 +1547,8 @@ FocusScope {
                     anchors.bottom: parent.bottom
                     height: appsRoot._px(2)
                     radius: height / 2
-                    color: Theme.accent
+                    // The accent at 55%, like the underline of Settings' tabs (05/11/2026).
+                    color: Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.55)
                     visible: tabItem._on
                 }
 
@@ -1278,6 +1556,11 @@ FocusScope {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
+                        // A click is the mouse: the field, not the on-screen keyboard.
+                        if (tabItem._isSearch) {
+                            appsRoot.enterSearch(false)
+                            return
+                        }
                         appsRoot.setLibraryTab(modelData.tab, true)
                         appsRoot.focusLibrary()
                     }
@@ -1291,15 +1574,199 @@ FocusScope {
             anchors.verticalCenterOffset: -appsRoot._px(5)
             size: appsRoot._px(26)
             buttonKey: "RB"; keyLabel: "PgDn"
-            onTriggered: { appsRoot.switchLibraryTab(1); appsRoot.focusLibrary() }
+            onTriggered: {
+                appsRoot.switchLibraryTab(1)
+                if (!appsRoot.searching) appsRoot.focusLibrary()
+            }
         }
     }
 
-    ListView {
-        id: appGrid
-        // Straight under the tabs: the column's caption is the list's own first section
-        // header, which scrolls away with the rows it names.
+    // ── Search bar (8.4.0) ───────────────────────────────────────────────────
+    // Under the tabs while searching: the library column's width in List, the grid's in Grid.
+    Item {
+        id: searchBar
+        visible: appsRoot.searching
         anchors.top: libraryTabs.bottom
+        anchors.left: parent.left
+        anchors.topMargin: appsRoot._px(12)
+        anchors.leftMargin: appsRoot._sideMargin
+        width: appsRoot.gridLayout ? appsRoot.width - appsRoot._sideMargin * 2 : appsRoot._libraryWidth
+        height: visible ? appsRoot._px(46) : 0
+
+        TextField {
+            id: searchField
+            anchors.fill: parent
+            leftPadding: appsRoot._px(44)
+            rightPadding: searchTools.width + appsRoot._px(12)
+            maximumLength: 40
+            // No placeholderText: the Material style floats it onto the top border once the
+            // field has focus, and this background leaves no gap there. Drawn below instead.
+            color: Theme.text
+            selectionColor: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.30)
+            selectedTextColor: Theme.text
+            font.family: Theme.family
+            font.pixelSize: appsRoot._px(Theme.fontBody)
+            selectByMouse: true
+            inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+            background: Rectangle {
+                color: Theme.ground
+                radius: appsRoot._px(8)
+                border.color: searchField.activeFocus ? Theme.ink : Theme.line
+                border.width: searchField.activeFocus ? 2 : 1
+            }
+            Accessible.name: qsTr("Search")
+
+            onTextChanged: if (appsRoot.searching) searchDebounce.restart()
+
+            // The keyboard is modal, so none of these arrive while it is up: they are the field's.
+            Keys.onPressed: function(event) {
+                switch (event.key) {
+                // X deletes, as on the keyboard. Y is left to main.qml: Settings.
+                case Qt.Key_Menu:
+                    appsRoot.searchBackspace()
+                    event.accepted = true
+                    break
+                case Qt.Key_Return:
+                case Qt.Key_Enter:
+                    // The pad's A opens the on-screen keyboard (offer() takes only a key the pad
+                    // sent); Enter on a keyboard goes to the results.
+                    if (searchKeyboard.offer(event)) break
+                    // fall through
+                case Qt.Key_Down:
+                    appsRoot.showResults()
+                    event.accepted = true
+                    break
+                case Qt.Key_Escape:
+                    // Accepted either way, or AppShell would take it and go Home. The text
+                    // first, then the search.
+                    if (searchField.text.length > 0) searchField.clear()
+                    else appsRoot.exitSearch(appsRoot._tabBeforeSearch, true, false)
+                    event.accepted = true
+                    break
+                // Start is Done, as on the on-screen keyboard.
+                case Qt.Key_F18:
+                    appsRoot.showResults()
+                    event.accepted = true
+                    break
+                // Select (per-game settings) and the right stick (move) act on the selected
+                // entry, which is not where the user is looking while they type.
+                case Qt.Key_F13:
+                case Qt.Key_F19:
+                    event.accepted = true
+                    break
+                }
+            }
+        }
+
+        Label {
+            anchors.left: parent.left
+            anchors.leftMargin: searchField.leftPadding
+            anchors.verticalCenter: parent.verticalCenter
+            visible: searchField.text.length === 0 && searchField.preeditText.length === 0
+            text: qsTr("Search this library")
+            color: appsRoot._text3
+            font: searchField.font
+        }
+
+        Image {
+            anchors.left: parent.left
+            anchors.leftMargin: appsRoot._px(14)
+            anchors.verticalCenter: parent.verticalCenter
+            width: appsRoot._px(18)
+            height: width
+            source: Theme.light ? "qrc:/res/search_dark.svg" : "qrc:/res/search.svg"
+            sourceSize.width: width * Screen.devicePixelRatio
+            sourceSize.height: height * Screen.devicePixelRatio
+            smooth: true
+            opacity: 0.6
+        }
+
+        // How many matched, then × to clear and ⌨ for the on-screen keyboard — both for the
+        // mouse; the pad has X on the keyboard and Up from the results.
+        Row {
+            id: searchTools
+            anchors.right: parent.right
+            anchors.rightMargin: appsRoot._px(8)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: appsRoot._px(4)
+
+            Label {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: searchField.text.trim().length > 0
+                // Plural by hand: no translation is ever loaded, so qsTr's %n would print
+                // "result(s)" as written.
+                readonly property int _n: appGrid ? appGrid.count : 0
+                text: _n === 1 ? qsTr("1 result") : qsTr("%1 results").arg(_n)
+                color: appsRoot._text3
+                font.family: Theme.family
+                font.pixelSize: appsRoot._px(Theme.fontSmall)
+                rightPadding: appsRoot._px(6)
+            }
+
+            Repeater {
+                model: [
+                    { glyph: "×", tip: qsTr("Clear"), shown: searchField.text.length > 0 },
+                    { glyph: "⌨", tip: qsTr("On-screen keyboard"), shown: !appsRoot.searchKeyboardOpen }
+                ]
+                delegate: Rectangle {
+                    visible: modelData.shown
+                    width: appsRoot._px(30)
+                    height: width
+                    radius: appsRoot._px(6)
+                    color: toolMouse.containsMouse
+                           ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16) : "transparent"
+                    Accessible.role: Accessible.Button
+                    Accessible.name: modelData.tip
+
+                    Label {
+                        anchors.centerIn: parent
+                        text: modelData.glyph
+                        color: appsRoot._text2
+                        // ⌨ is not in DM Sans; JetBrains Mono has both glyphs (measured).
+                        font.family: Theme.monoFamily
+                        font.pixelSize: appsRoot._px(Theme.fontBody)
+                    }
+                    MouseArea {
+                        id: toolMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (index === 0) {
+                                searchField.clear()
+                                searchField.forceActiveFocus()
+                            }
+                            else appsRoot.openKeyboard()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The library search's on-screen keyboard: the app's own, at the bottom of the window over
+    // the library, which stays where it is. Done (Start) applies what was typed and goes to the
+    // results; B closes it back to the field, the query kept.
+    VirtualKeyboard {
+        id: searchKeyboard
+        target: searchField
+        mode: "text"
+        onAccepted: {
+            close()
+            appsRoot.showResults()
+        }
+    }
+
+    // The right stick scrolls this view (7.0.0) — see PadScroll.
+    PadScroll { flick: appGrid }
+    ListView {
+        id: appList
+        visible: !appsRoot.gridLayout
+        enabled: visible
+        // Straight under the tabs: the column's caption is the list's own first section
+        // header, which scrolls away with the rows it names. Under the search bar while
+        // searching.
+        anchors.top: appsRoot.searching ? searchBar.bottom : libraryTabs.bottom
         anchors.left: parent.left
         anchors.bottom: parent.bottom
         anchors.topMargin: appsRoot._px(8)
@@ -1321,7 +1788,64 @@ FocusScope {
                             ? ListView.ApplyRange : ListView.NoHighlightRange
         preferredHighlightBegin: appsRoot._px(60)
         preferredHighlightEnd: height - appsRoot._px(60)
-        highlightMoveDuration: Theme.reduceAnimations ? 0 : 160
+        /*
+         * The focus glides (7.0.0): while the pad or the keyboard drives the list, the lit row
+         * is ONE shape that slides from game to game, instead of one row going dark as the
+         * next lights up. The rows then draw no light of their own (_glide). The mouse keeps
+         * the per-row light: the pointer is already where it is.
+         *
+         * ⚠️ Moved by the ListView itself (highlightFollowsCurrentItem), not by a Behavior of
+         * its own (09/10/2026). It had one — a 260 ms spring on y — while the view scrolled
+         * to keep the row in range over 160 ms: two clocks for one movement, so walking the
+         * list looked unsure, and the spring also fired whenever the rows were rebuilt under
+         * it — a pin moving the game to PINNED, a tab switch — swinging across the list for
+         * no step at all. Now the view moves the shape and the scroll together, and only for
+         * a step the user took (_stepping); anything else puts it in place at once.
+         */
+        property bool _stepping: false
+        Timer { id: stepWindow; interval: 350; onTriggered: appGrid._stepping = false }
+        function _noteStep() { appGrid._stepping = true; stepWindow.restart() }
+        highlightFollowsCurrentItem: true
+        highlightMoveVelocity: -1
+        highlightMoveDuration: Theme.reduceAnimations || !appGrid._stepping ? 0 : 110
+        highlightResizeDuration: 0
+
+        readonly property bool _glide: appGrid.activeFocus && SdlGamepadKeyNavigation.inputMode === "key"
+                                       && !Theme.reduceAnimations
+        // The rows arrive one after another when the list fills (7.0.0): each rises 8 px and
+        // fades in, 18 ms after the one before; past the eighth they come together, so a long
+        // library never makes anyone wait for it. Not while searching: every change of words
+        // refills the list, and the rows would rise again on each one.
+        populate: Transition {
+            id: rowsIn
+            enabled: !Theme.reduceAnimations && !appsRoot.searching
+            SequentialAnimation {
+                PropertyAction { property: "opacity"; value: 0 }
+                PauseAnimation { duration: Math.min(rowsIn.ViewTransition.index, 8) * 18 }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 150; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "y"; from: rowsIn.ViewTransition.destination.y + appsRoot._px(8)
+                                      to: rowsIn.ViewTransition.destination.y; duration: 170
+                                      easing.type: Easing.OutCubic }
+                }
+            }
+        }
+        // An Item the view moves and sizes to the row; the shape inside keeps the row's
+        // visible height, short of the gap below it.
+        highlight: Item {
+            z: 0
+            Rectangle {
+                // === true: while the page is torn down _glide reads undefined, and a bool will
+                // not take it (a warning in every log that left the host page).
+                visible: appGrid._glide === true && appGrid.currentItem !== null
+                width: parent.width
+                height: appGrid._rowH - appGrid._gap
+                radius: appsRoot._px(10)
+                color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
+                border.width: 2
+                border.color: Theme.ink
+            }
+        }
 
         property AppModel appModel: createModel()
         property bool activated
@@ -1351,7 +1875,7 @@ FocusScope {
          */
         property string firstSection: ""
         function updateContinue() {
-            firstSection = count > 0 ? appModel.sectionAt(0) : ""
+            firstSection = appModel && count > 0 ? appModel.sectionAt(0) : ""
         }
         onCountChanged: updateContinue()
 
@@ -1369,9 +1893,9 @@ FocusScope {
          * default), so each heading now leaves the screen when its rows do.
          */
         section.delegate: Item {
-            width: appGrid.width
+            width: appList.width
             readonly property bool _isContinue: section === "continue"
-            readonly property bool _isFirst: section === appGrid.firstSection
+            readonly property bool _isFirst: section === appList.firstSection
             // The first heading needs no room above it — the caption line already sits there.
             height: _isFirst ? appsRoot._px(24) : appsRoot._px(46)
 
@@ -1381,9 +1905,10 @@ FocusScope {
                 anchors.bottomMargin: appsRoot._px(8)
                 text: parent._isContinue ? qsTr("LAST PLAYED")
                     : section === "pinned" ? qsTr("PINNED")
+                    : appsRoot.searching ? qsTr("RESULTS")
                     : appsRoot.libraryTab === "apps" ? qsTr("ALL APPS")
                     : appsRoot.libraryTab === "games" ? qsTr("ALL GAMES") : qsTr("ALL")
-                color: parent._isContinue ? Theme.accent : Theme.text3
+                color: parent._isContinue ? Theme.inkText : appsRoot._text3
                 font.family: Theme.family
                 font.pixelSize: appsRoot._px(Theme.fontSmall)
                 font.letterSpacing: appsRoot._u * 1.6
@@ -1403,19 +1928,20 @@ FocusScope {
             }
         }
 
-        focus: true
-        activeFocusOnTab: true
+        focus: !appsRoot.gridLayout
+        activeFocusOnTab: visible
 
         readonly property int _rowH: appsRoot._px(84)
         readonly property int _gap:  appsRoot._px(6)
 
-        Component.onCompleted: {
+        function initializeLibrary() {
             // The tab first: it decides which rows exist. Then row 0 is the game you last
             // played whenever there is one — the model sorts it there — so opening the page
             // already has A pointed at it.
             appsRoot._pickOpeningTab()
-            currentIndex = 0
+            appsRoot.appGrid.currentIndex = 0
             updateContinue()
+            appsRoot.focusLibrary()
             appModel.computerLost.connect(computerLost)
             activated = true
 
@@ -1432,8 +1958,11 @@ FocusScope {
                     if (directLaunchAppIndex < 0) appsRoot.setLibraryTab(startTab, false)
                 }
                 if (directLaunchAppIndex >= 0) {
-                    currentIndex = directLaunchAppIndex
-                    currentItem.launchOrResumeSelectedApp(false)
+                    appsRoot.appGrid.currentIndex = directLaunchAppIndex
+                    Qt.callLater(function() {
+                        if (appsRoot.appGrid.currentItem)
+                            appsRoot.appGrid.currentItem.launchOrResumeSelectedApp(false)
+                    })
                     showGames = true
                 }
             }
@@ -1458,6 +1987,33 @@ FocusScope {
             if (appsRoot.appShell) appsRoot.appShell.showHome()
         }
 
+        // Pressing past either end of the list gives a little and springs back (7.0.0): the
+        // list says it has ended without a sound or a notice. The key is not taken — whatever
+        // else listens for it still hears it.
+        transform: Translate { id: edgeShift }
+        SequentialAnimation {
+            id: edgeBounce
+            property real dir: 1
+            NumberAnimation { target: edgeShift; property: "y"; to: edgeBounce.dir * appsRoot._px(12); duration: 90; easing.type: Easing.OutQuad }
+            NumberAnimation { target: edgeShift; property: "y"; to: 0; duration: 260; easing.type: Easing.OutBack; easing.overshoot: 2.0 }
+        }
+        function _bounce(dir) {
+            if (Theme.reduceAnimations || edgeBounce.running) return
+            edgeBounce.dir = dir
+            edgeBounce.start()
+        }
+        Keys.onDownPressed: function(event) { _noteStep(); if (count > 0 && currentIndex === count - 1) _bounce(-1); event.accepted = false }
+        // While searching, Up from the first row goes back to the search instead of bouncing.
+        Keys.onUpPressed: function(event) {
+            if (appsRoot.searching && currentIndex <= 0) {
+                appsRoot.focusSearch()
+                event.accepted = true
+                return
+            }
+            _noteStep()
+            if (count > 0 && currentIndex === 0) _bounce(1)
+            event.accepted = false
+        }
         Keys.onReturnPressed: function(event) { if (currentItem) currentItem.launchOrResumeSelectedApp(true); event.accepted = true }
         Keys.onEnterPressed:  function(event) { if (currentItem) currentItem.launchOrResumeSelectedApp(true); event.accepted = true }
         Keys.onSpacePressed:  function(event) { if (currentItem) currentItem.launchOrResumeSelectedApp(true); event.accepted = true }
@@ -1489,11 +2045,105 @@ FocusScope {
 
         model: appModel
 
-        delegate: NavigableItemDelegate {
+        delegate: libraryDelegate
+
+        /*
+         * On the left edge of the list, not the right.
+         *
+         * A ScrollBar sits at the trailing edge by default, which was fine when the list was
+         * the whole page. With the library in the left column that edge lands in the middle
+         * of the screen, between the two halves, where it reads as a divider rather than as
+         * the scrollbar of anything. On the outside edge it separates nothing and stays
+         * attached to the column it describes.
+         *
+         * ⚠️ mirrored, not a negative x: the handle has to grow from the correct side, and
+         * LayoutMirroring on the bar alone flips it without touching the list's own layout.
+         */
+        ScrollBar.vertical: ThemedScrollBar {
+            parent: appList
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.leftMargin: -appsRoot._px(14)
+            LayoutMirroring.enabled: true
+        }
+    }
+
+
+    GridView {
+        id: coverGrid
+        anchors.top: appsRoot.searching ? searchBar.bottom : libraryTabs.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.topMargin: appsRoot._px(8)
+        anchors.leftMargin: appsRoot._sideMargin - appsRoot._px(10)
+        anchors.rightMargin: appsRoot._sideMargin - appsRoot._px(10)
+        anchors.bottomMargin: appsRoot._px(58)
+        visible: appsRoot.gridLayout
+        enabled: visible
+        focus: appsRoot.gridLayout
+        activeFocusOnTab: visible
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        keyNavigationWraps: false
+
+        readonly property int targetCellWidth: appsRoot._px(Theme.libraryCoverSize === 0 ? 120
+                                                          : Theme.libraryCoverSize === 2 ? 220 : 170)
+        readonly property int columns: Math.max(1, Math.floor(width / targetCellWidth))
+        cellWidth: Math.floor(width / columns)
+        cellHeight: Math.round((cellWidth - appsRoot._px(20)) * 1.5)
+                    + appsRoot._px(Theme.libraryShowTitles ? 70 : 32)
+        highlightRangeMode: SdlGamepadKeyNavigation.inputMode === "key"
+                            ? GridView.ApplyRange : GridView.NoHighlightRange
+        preferredHighlightBegin: 0
+        preferredHighlightEnd: height
+        highlightMoveDuration: Theme.reduceAnimations ? 0 : 160
+
+        // Shared model: switching layout never rebuilds host/session state.
+        property alias appModel: appList.appModel
+        property alias storeMap: appList.storeMap
+        function updateContinue() { appList.updateContinue() }
+        model: appModel
+        delegate: libraryDelegate
+
+        // A newly paired host can populate its library after the page opens.
+        onCountChanged: {
+            if (count > 0 && currentIndex < 0) currentIndex = 0
+        }
+
+        Keys.onReturnPressed: function(event) { if (currentItem) currentItem.launchOrResumeSelectedApp(true); event.accepted = true }
+        Keys.onEnterPressed: function(event) { if (currentItem) currentItem.launchOrResumeSelectedApp(true); event.accepted = true }
+        Keys.onSpacePressed: function(event) { if (currentItem) currentItem.launchOrResumeSelectedApp(true); event.accepted = true }
+        // While searching, Up from the top row goes back to the search. Otherwise the grid's own.
+        Keys.onUpPressed: function(event) {
+            if (appsRoot.searching && currentIndex < columns) {
+                appsRoot.focusSearch()
+                event.accepted = true
+                return
+            }
+            event.accepted = false
+        }
+
+        ScrollBar.vertical: ThemedScrollBar { }
+    }
+
+    // The launch, resume and quit paths are identical in both layouts.
+    Component {
+        id: libraryDelegate
+        NavigableItemDelegate {
             id: appDelegate
-            width: appGrid.width
-            height: appGrid._rowH
-            grid: appGrid
+            readonly property var libraryView: ListView.view || GridView.view
+            readonly property bool _gridTile: libraryView === coverGrid
+            readonly property string _gridBadgeKind: !_gridTile ? ""
+                                                     : _running ? "streaming"
+                                                     : model.section === "continue" ? "lastPlayed" : ""
+            width: _gridTile ? libraryView.cellWidth : libraryView.width
+            height: _gridTile ? libraryView.cellHeight : libraryView._rowH
+            grid: libraryView
+            Accessible.name: model.name
+            Accessible.description: _gridBadgeKind === "streaming" ? qsTr("Streaming")
+                                    : _gridBadgeKind === "lastPlayed" ? qsTr("Last played") : ""
 
             // Exposed to appsRoot for the hero and the status-bar prompts.
             property int    _appId:      model.appid
@@ -1510,24 +2160,26 @@ FocusScope {
             // Selected is not the same as focused: a dialog on top of the page takes the
             // focus away while the spotlight still shows the selected game, so the row keeps
             // a quiet marker in that case and only lights up when the list itself has it.
-            readonly property bool _selected: appGrid.currentIndex === index
+            readonly property bool _selected: libraryView.currentIndex === index
             readonly property bool _lit:
-                appDelegate.inputFocused || (_selected && appGrid.activeFocus)
+                appDelegate.inputFocused || (_selected && libraryView.activeFocus)
 
             // Disable Material's default focus highlight; the row draws its own.
             background: Item { anchors.fill: parent }
 
             Rectangle {
                 id: row
+                visible: !appDelegate._gridTile
                 anchors.fill: parent
-                anchors.bottomMargin: appGrid._gap
+                anchors.bottomMargin: appDelegate._gridTile ? 0 : libraryView._gap
                 radius: appsRoot._px(10)
 
-                color: appDelegate._lit     ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
-                     : appDelegate._selected ? "#14ffffff"
+                color: (appDelegate._lit && appGrid._glide) ? "transparent"
+                     : appDelegate._lit     ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
+                     : appDelegate._selected ? Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
                      :                         "transparent"
-                border.width: appDelegate._lit ? 2 : (appDelegate._selected ? 1 : 0)
-                border.color: appDelegate._lit ? Theme.accent : Theme.line
+                border.width: (appDelegate._lit && appGrid._glide) ? 0 : appDelegate._lit ? 2 : (appDelegate._selected ? 1 : 0)
+                border.color: appDelegate._lit ? Theme.ink : Theme.line
 
                 // Both, not just the fill: the border used to snap to the accent while the
                 // fill faded in behind it, so the outline arrived before the light did.
@@ -1563,7 +2215,7 @@ FocusScope {
                     Rectangle {
                         anchors.fill: parent
                         visible: cover.status !== Image.Ready
-                        color: "#18ffffff"
+                        color: Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.09)
                         radius: appsRoot._px(4)
                     }
                 }
@@ -1581,7 +2233,7 @@ FocusScope {
                     anchors.verticalCenter: parent.verticalCenter
                     width: appsRoot._px(18)
                     height: width
-                    source: "qrc:/res/pin.svg"
+                    source: Theme.light ? "qrc:/res/pin_dark.svg" : "qrc:/res/pin.svg"
                     sourceSize.width: width * Screen.devicePixelRatio
                     sourceSize.height: height * Screen.devicePixelRatio
                     smooth: true
@@ -1599,6 +2251,8 @@ FocusScope {
 
                     Label {
                         width: parent.width
+                        // Plain text: a name from the host, never markup (8.5.0, security review).
+                        textFormat: Text.PlainText
                         text: model.name
                         color: Theme.text
                         font.family: Theme.family
@@ -1609,7 +2263,7 @@ FocusScope {
                     }
 
                     Label {
-                        property string store: appGrid.storeMap[model.name] || ""
+                        property string store: libraryView.storeMap[model.name] || ""
                         width: parent.width
                         visible: store.length > 0 || model.overridden
                                  || (!model.isApp && model.playtime && model.playtime.length > 0)
@@ -1625,7 +2279,7 @@ FocusScope {
                             if (model.overridden)   parts.push(qsTr("custom settings"))
                             return parts.join("  ·  ")
                         }
-                        color: Theme.text3
+                        color: appsRoot._text3
                         // The same body as the store line in the spotlight: one size for the
                         // page's secondary text instead of a 15 here and a 17 there.
                         font.pixelSize: appsRoot._px(Theme.fontBody)
@@ -1648,10 +2302,10 @@ FocusScope {
                     width: runTagLabel.implicitWidth + appsRoot._px(22)
                     height: appsRoot._px(26)
                     radius: appsRoot._px(6)
-                    color: Theme.accent
+                    color: Theme.accentFill
 
                     SequentialAnimation on opacity {
-                        running: runTag.visible && !Theme.reduceAnimations
+                        running: !appDelegate._gridTile && runTag.visible && !Theme.reduceAnimations
                         // Held while the window is dragged — see WindowMove / AmbientWaves.
                         paused: running && WindowMove.moving
                         loops: Animation.Infinite
@@ -1678,6 +2332,152 @@ FocusScope {
                 //  mouse reaches the same dialog from the Per-game settings button above.)
             }
 
+
+            Item {
+                visible: appDelegate._gridTile
+                anchors.fill: parent
+                anchors.margins: appsRoot._px(10)
+
+                Item {
+                    id: tileFrame
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: width * 1.5
+
+                    Rectangle {
+                        anchors.fill: parent
+                        visible: tileArt.status !== Image.Ready
+                        color: Theme.card
+                        radius: tileArt.radius
+                    }
+
+                    HeroCover {
+                        id: tileArt
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        height: parent.height
+                        source: model.boxart
+                        radius: appsRoot._px(10)
+                        shadow: appDelegate._gridTile && !Theme.reduceAnimations
+                        shadowOffset: appsRoot._px(10)
+                    }
+
+                    Label {
+                        anchors.fill: parent
+                        anchors.margins: appsRoot._px(12)
+                        visible: tileArt.status !== Image.Ready
+                        // Plain text: a name from the host, never markup (8.5.0, security review).
+                        textFormat: Text.PlainText
+                        text: model.name
+                        color: Theme.text2
+                        font.family: Theme.family
+                        font.pixelSize: appsRoot._px(Theme.fontTitle)
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        wrapMode: Text.Wrap
+                        elide: Text.ElideRight
+                    }
+
+                    // The focus outline is a line, so ink (3:1 in Light), not the raw accent.
+                    Rectangle {
+                        anchors.fill: tileArt
+                        radius: tileArt.radius
+                        visible: appDelegate._lit
+                        color: "transparent"
+                        border.width: appsRoot._px(3)
+                        border.color: Theme.ink
+                    }
+
+                    // Pinned (8.1.0): the grid has no PINNED heading, so without this a game
+                    // pinned with Start would just move, with nothing saying why. On a dark
+                    // disc because it sits on a picture of any colour.
+                    Rectangle {
+                        visible: appDelegate._pinned
+                        anchors.top: tileArt.top
+                        anchors.left: tileArt.left
+                        anchors.topMargin: appsRoot._px(8)
+                        anchors.leftMargin: appsRoot._px(8)
+                        width: appsRoot._px(28)
+                        height: width
+                        radius: width / 2
+                        color: Qt.rgba(0, 0, 0, 0.6)
+
+                        Image {
+                            anchors.centerIn: parent
+                            width: appsRoot._px(16)
+                            height: width
+                            source: "qrc:/res/pin.svg"
+                            sourceSize.width: width * Screen.devicePixelRatio
+                            sourceSize.height: height * Screen.devicePixelRatio
+                            smooth: true
+                        }
+                    }
+
+                    Rectangle {
+                        id: gridStatusBadge
+                        anchors.top: tileArt.top
+                        anchors.right: tileArt.right
+                        anchors.topMargin: appsRoot._px(8)
+                        anchors.rightMargin: appsRoot._px(8)
+                        visible: appDelegate._gridBadgeKind !== ""
+                        width: Math.min(Math.ceil(gridStatusMetrics.advanceWidth) + appsRoot._px(16),
+                                        Math.max(0, tileArt.width - appsRoot._px(16)))
+                        height: appsRoot._px(24)
+                        radius: appsRoot._px(6)
+                        color: appDelegate._gridBadgeKind === "streaming" ? Theme.accentFill
+                               : Qt.rgba(Theme.card.r, Theme.card.g, Theme.card.b, 0.92)
+
+                        TextMetrics {
+                            id: gridStatusMetrics
+                            text: gridStatusLabel.text
+                            font.family: Theme.family
+                            font.pixelSize: appsRoot._px(Theme.fontCaption)
+                            font.bold: true
+                        }
+
+                        Label {
+                            id: gridStatusLabel
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.leftMargin: appsRoot._px(8)
+                            anchors.rightMargin: appsRoot._px(8)
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: appDelegate._gridBadgeKind === "streaming" ? qsTr("STREAMING")
+                                  : appDelegate._gridBadgeKind === "lastPlayed" ? qsTr("LAST PLAYED") : ""
+                            color: appDelegate._gridBadgeKind === "streaming" ? Theme.onAccent : Theme.text
+                            font.family: Theme.family
+                            font.pixelSize: appsRoot._px(Theme.fontCaption)
+                            font.bold: true
+                            fontSizeMode: Text.HorizontalFit
+                            minimumPixelSize: appsRoot._px(8)
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
+                        }
+                    }
+                }
+
+                Label {
+                    anchors.top: tileFrame.bottom
+                    visible: Theme.libraryShowTitles
+                    anchors.topMargin: appsRoot._px(8)
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: appsRoot._px(42)
+                    // Plain text: a name from the host, never markup (8.5.0, security review).
+                    textFormat: Text.PlainText
+                    text: model.name
+                    color: appDelegate._lit ? Theme.text : appsRoot._text2
+                    font.family: Theme.family
+                    font.pixelSize: appsRoot._px(Theme.fontBody)
+                    font.weight: appDelegate._lit ? Font.DemiBold : Font.Normal
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                }
+            }
+
             function launchOrResumeSelectedApp(quitExistingApp) {
                 // Drop stale events that arrive after a stream session pops.
                 if (Window.window && Window.window._streamJustEnded === true) {
@@ -1690,8 +2490,8 @@ FocusScope {
                     return
                 }
 
-                // Must use appGrid.appModel — bare appModel is not in scope.
-                var m = appGrid.appModel
+                // Must use libraryView.appModel — bare appModel is not in scope.
+                var m = libraryView.appModel
                 var runningId = m.getRunningAppId()
                 // A host control runs beside the game rather than replacing it (Remote Input
                 // and Remote Monitor exist precisely to be used while one is running), so it
@@ -1715,6 +2515,14 @@ FocusScope {
                 // The curtain wants the box art, and this delegate is the only place that has
                 // it: it comes from the app model, while NvApp carries no artwork at all.
                 // Plain values only — the segue is built by the page, see launchSegue().
+                //
+                // A new launch goes through the lock check first (7.0.0, #35). A rejoin and a
+                // host control do not: a session is already up, and the PIN pad's Desktop
+                // session would have to replace it — see HomeScreen.launchWhenUnlocked().
+                if (runningId === 0 && model.control === "") {
+                    appsRoot.launchNew(model.name, model.boxart, model.appid)
+                    return
+                }
                 appsRoot.launchSegue(model.name,
                                      model.boxart,
                                      m.createSessionForApp(index),
@@ -1734,15 +2542,15 @@ FocusScope {
              */
             onHoveredChanged: {
                 if (!hovered || SdlGamepadKeyNavigation.inputMode === "key"
-                        || appGrid.currentIndex === index)
+                        || libraryView.currentIndex === index)
                     return
-                var top = appDelegate.mapToItem(appGrid, 0, 0).y
-                if (top >= 0 && top + appDelegate.height <= appGrid.height)
-                    appGrid.currentIndex = index
+                var top = appDelegate.mapToItem(libraryView, 0, 0).y
+                if (top >= 0 && top + appDelegate.height <= libraryView.height)
+                    libraryView.currentIndex = index
             }
 
             onClicked: {
-                appGrid.currentIndex = index
+                libraryView.currentIndex = index
                 appsRoot.focusLibrary()
                 launchOrResumeSelectedApp(true)
             }
@@ -1750,46 +2558,36 @@ FocusScope {
             Keys.onEnterPressed:  launchOrResumeSelectedApp(true)
 
             function doQuitGame() {
-                quitAppDialog.appName = appGrid.appModel.getRunningAppName()
-                quitAppDialog.boxArt = appGrid.appModel.getRunningAppBoxArt()
+                quitAppDialog.appName = libraryView.appModel.getRunningAppName()
+                quitAppDialog.boxArt = libraryView.appModel.getRunningAppBoxArt()
                 quitAppDialog.segueToStream = false
                 quitAppDialog.open()
             }
         }
 
-        /*
-         * On the left edge of the list, not the right.
-         *
-         * A ScrollBar sits at the trailing edge by default, which was fine when the list was
-         * the whole page. With the library in the left column that edge lands in the middle
-         * of the screen, between the two halves, where it reads as a divider rather than as
-         * the scrollbar of anything. On the outside edge it separates nothing and stays
-         * attached to the column it describes.
-         *
-         * ⚠️ mirrored, not a negative x: the handle has to grow from the correct side, and
-         * LayoutMirroring on the bar alone flips it without touching the list's own layout.
-         */
-        ScrollBar.vertical: ScrollBar {
-            parent: appGrid
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            anchors.leftMargin: -appsRoot._px(14)
-            LayoutMirroring.enabled: true
-        }
     }
 
     // ── Empty state ───────────────────────────────────────────────────────────
     Label {
-        anchors.centerIn: parent
-        width: parent.width * 0.6
+        // The words the model is filtering by, not the field's text: during the debounce the
+        // two differ, and the message names the rows that are actually missing.
+        readonly property string _query: appsRoot.searching && appGrid.appModel
+                                         ? appGrid.appModel.filterText.trim() : ""
+        // While searching, on the library itself: in the list layout the spotlight fills the
+        // right of the page and the message belongs beside the results it replaces.
+        anchors.centerIn: appsRoot.searching ? appGrid : parent
+        width: appsRoot.searching ? appGrid.width * 0.8 : parent.width * 0.6
         visible: appGrid.count === 0
-        text: appsRoot.libraryTab === "games"
+        // Typed text: never read as markup.
+        textFormat: Text.PlainText
+        text: _query !== ""
+              ? qsTr("No matches for “%1”").arg(_query)
+              : appsRoot.libraryTab === "games"
               ? qsTr("No games to show — some may be hidden on the host")
               : appsRoot.libraryTab === "apps"
               ? qsTr("No apps to show — some may be hidden on the host")
               : qsTr("Nothing to show — some entries may be hidden on the host")
-        color: Theme.text2
+        color: appsRoot._text2
         font.family: Theme.family
         font.pixelSize: appsRoot._px(Theme.fontTitle)
         horizontalAlignment: Text.AlignHCenter
@@ -1805,7 +2603,9 @@ FocusScope {
         property string nextAppName: ""
         property string nextBoxArt: ""
         property int nextAppId: 0
-        text: qsTr("Are you sure you want to quit %1? Any unsaved progress will be lost.").arg(appName)
+        // The game's name comes from the host: a "<" in it would let the dialog read it as markup
+        // (8.5.0, security review). The look-alike ‹ cannot open a tag.
+        text: qsTr("Are you sure you want to quit %1? Any unsaved progress will be lost.").arg(String(appName).replace(/</g, "‹"))
         standardButtons: Dialog.Yes | Dialog.No
 
         function quitApp() {
@@ -1828,6 +2628,7 @@ FocusScope {
             var params = {
                 "appName": appName,
                 "boxArt": boxArt,
+                "hostName": appsRoot.hostName,
                 "quitRunningAppFn": function() { appGrid.appModel.quitRunningApp() },
                 // A deliberate stop no longer puts the link back by itself — the question is
                 // put once, on returning to the host list.

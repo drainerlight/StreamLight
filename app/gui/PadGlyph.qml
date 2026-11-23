@@ -9,9 +9,9 @@ import SdlGamepadKeyNavigation 1.0
 Item {
     id: glyph
 
-    property string buttonKey: ""   // "A","B","X","Y","LB","RB","LT","RT","START","SELECT","RS" (right stick click)
+    property string buttonKey: ""   // "A","B","X","Y","LB","RB","LT","RT","START","SELECT","LS" (left stick click), "RS" (right stick click), "RSCROLL" (right stick up/down), "RSCROLLX" (left/right), "RSMOVE" (any way)
     property string label: ""        // text fallback
-    property string glyphSet: SdlGamepadKeyNavigation.controllerType // "xbox"/"ps"/"switch"/...
+    property string glyphSet: SdlGamepadKeyNavigation.controllerType // "xbox"/"ps"/"switch"/"steam"/...
     // Height of a face button. Shoulders and the Select/Start pills are wider than they are
     // tall, so they derive from it rather than being squeezed into a square.
     property int size: 26
@@ -29,23 +29,35 @@ Item {
 
     readonly property bool _ps: glyphSet === "ps"
     readonly property bool _sw: glyphSet === "switch"
+    // 6.5.1: Steam Controller / Steam Deck. Same face positions as Xbox, Steam's own names on
+    // the rest (L1/R1, L2/R2, R3), drawn white like Steam draws them.
+    readonly property bool _st: glyphSet === "steam"
 
     // Direct ternary binding (no helper function) so it re-resolves reactively
     // when the glyph set changes — a function-call binding can fail to register
     // the dependency under compiled QML, which left these stale on a vendor
     // switch while the status bar updated correctly.
     readonly property string _resolved:
-          buttonKey === "A"      ? (_ps ? "qrc:/res/pad_ps_cross.svg"    : _sw ? "qrc:/res/pad_switch_b.svg"     : "qrc:/res/pad_xbox_a.svg")
-        : buttonKey === "B"      ? (_ps ? "qrc:/res/pad_ps_circle.svg"   : _sw ? "qrc:/res/pad_switch_a.svg"     : "qrc:/res/pad_xbox_b.svg")
-        : buttonKey === "X"      ? (_ps ? "qrc:/res/pad_ps_square.svg"   : _sw ? "qrc:/res/pad_switch_y.svg"     : "qrc:/res/pad_xbox_x.svg")
-        : buttonKey === "Y"      ? (_ps ? "qrc:/res/pad_ps_triangle.svg" : _sw ? "qrc:/res/pad_switch_x.svg"     : "qrc:/res/pad_xbox_y.svg")
-        : buttonKey === "LB"     ? (_ps ? "qrc:/res/pad_ps_l1.svg"       : _sw ? "qrc:/res/pad_switch_l.svg"     : "qrc:/res/pad_xbox_lb.svg")
-        : buttonKey === "RB"     ? (_ps ? "qrc:/res/pad_ps_r1.svg"       : _sw ? "qrc:/res/pad_switch_r.svg"     : "qrc:/res/pad_xbox_rb.svg")
-        : buttonKey === "LT"     ? (_ps ? "qrc:/res/pad_ps_l2.svg"       : _sw ? "qrc:/res/pad_switch_zl.svg"    : "qrc:/res/pad_xbox_lt.svg")
-        : buttonKey === "RT"     ? (_ps ? "qrc:/res/pad_ps_r2.svg"       : _sw ? "qrc:/res/pad_switch_zr.svg"    : "qrc:/res/pad_xbox_rt.svg")
-        : buttonKey === "SELECT" ? (_ps ? "qrc:/res/pad_ps_create.svg"   : _sw ? "qrc:/res/pad_switch_minus.svg" : "qrc:/res/pad_xbox_view.svg")
-        : buttonKey === "START"  ? (_ps ? "qrc:/res/pad_ps_options.svg"  : _sw ? "qrc:/res/pad_switch_plus.svg"  : "qrc:/res/pad_xbox_start.svg")
-        : buttonKey === "RS"     ? (_ps ? "qrc:/res/pad_ps_r3.svg"       : _sw ? "qrc:/res/pad_switch_rs.svg"    : "qrc:/res/pad_xbox_rs.svg")
+          buttonKey === "A"      ? (_ps ? "qrc:/res/pad_ps_cross.svg"    : _sw ? "qrc:/res/pad_switch_b.svg"     : _st ? "qrc:/res/pad_steam_a.svg"    : "qrc:/res/pad_xbox_a.svg")
+        : buttonKey === "B"      ? (_ps ? "qrc:/res/pad_ps_circle.svg"   : _sw ? "qrc:/res/pad_switch_a.svg"     : _st ? "qrc:/res/pad_steam_b.svg"    : "qrc:/res/pad_xbox_b.svg")
+        : buttonKey === "X"      ? (_ps ? "qrc:/res/pad_ps_square.svg"   : _sw ? "qrc:/res/pad_switch_y.svg"     : _st ? "qrc:/res/pad_steam_x.svg"    : "qrc:/res/pad_xbox_x.svg")
+        : buttonKey === "Y"      ? (_ps ? "qrc:/res/pad_ps_triangle.svg" : _sw ? "qrc:/res/pad_switch_x.svg"     : _st ? "qrc:/res/pad_steam_y.svg"    : "qrc:/res/pad_xbox_y.svg")
+        : buttonKey === "LB"     ? (_ps ? "qrc:/res/pad_ps_l1.svg"       : _sw ? "qrc:/res/pad_switch_l.svg"     : _st ? "qrc:/res/pad_steam_l1.svg"   : "qrc:/res/pad_xbox_lb.svg")
+        : buttonKey === "RB"     ? (_ps ? "qrc:/res/pad_ps_r1.svg"       : _sw ? "qrc:/res/pad_switch_r.svg"     : _st ? "qrc:/res/pad_steam_r1.svg"   : "qrc:/res/pad_xbox_rb.svg")
+        : buttonKey === "LT"     ? (_ps ? "qrc:/res/pad_ps_l2.svg"       : _sw ? "qrc:/res/pad_switch_zl.svg"    : _st ? "qrc:/res/pad_steam_l2.svg"   : "qrc:/res/pad_xbox_lt.svg")
+        : buttonKey === "RT"     ? (_ps ? "qrc:/res/pad_ps_r2.svg"       : _sw ? "qrc:/res/pad_switch_zr.svg"    : _st ? "qrc:/res/pad_steam_r2.svg"   : "qrc:/res/pad_xbox_rt.svg")
+        : buttonKey === "SELECT" ? (_ps ? "qrc:/res/pad_ps_create.svg"   : _sw ? "qrc:/res/pad_switch_minus.svg" : _st ? "qrc:/res/pad_steam_view.svg" : "qrc:/res/pad_xbox_view.svg")
+        : buttonKey === "START"  ? (_ps ? "qrc:/res/pad_ps_options.svg"  : _sw ? (Theme.light ? "qrc:/res/pad_switch_plus_dark.svg" : "qrc:/res/pad_switch_plus.svg")  : _st ? "qrc:/res/pad_steam_menu.svg" : "qrc:/res/pad_xbox_start.svg")
+        : buttonKey === "LS"     ? (_ps ? "qrc:/res/pad_ps_l3.svg"       : _sw ? "qrc:/res/pad_switch_ls.svg"    : _st ? "qrc:/res/pad_steam_l3.svg"   : "qrc:/res/pad_xbox_ls.svg")
+        : buttonKey === "RS"     ? (_ps ? "qrc:/res/pad_ps_r3.svg"       : _sw ? "qrc:/res/pad_switch_rs.svg"    : _st ? "qrc:/res/pad_steam_r3.svg"   : "qrc:/res/pad_xbox_rs.svg")
+        // 7.0.0: the right stick held up or down, not clicked — the "Scroll" prompt.
+        : buttonKey === "RSCROLL" ? (_ps ? "qrc:/res/pad_ps_r_scroll.svg" : _sw ? "qrc:/res/pad_switch_rs_scroll.svg" : _st ? "qrc:/res/pad_steam_rs_scroll.svg" : "qrc:/res/pad_xbox_rs_scroll.svg")
+        // 8.0.0: held left or right (a strip that scrolls sideways), and pushed any way (a panel
+        // that moves, such as the on-screen keyboard).
+        : buttonKey === "RSCROLLX" ? (_ps ? "qrc:/res/pad_ps_r_scroll_h.svg" : _sw ? "qrc:/res/pad_switch_rs_scroll_h.svg" : _st ? "qrc:/res/pad_steam_rs_scroll_h.svg" : "qrc:/res/pad_xbox_rs_scroll_h.svg")
+        // 8.0.0: the D-pad left or right (a cursor), the same drawing for every vendor.
+        : buttonKey === "DPADX"    ? "qrc:/res/pad_dpad_h.svg"
+        : buttonKey === "RSMOVE"   ? (_ps ? "qrc:/res/pad_ps_r_move.svg"     : _sw ? "qrc:/res/pad_switch_rs_move.svg"     : _st ? "qrc:/res/pad_steam_rs_move.svg"     : "qrc:/res/pad_xbox_rs_move.svg")
         : ""
 
     Image {

@@ -1,5 +1,6 @@
 #include "streamsettingsoverlay.h"
 #include "streaming/session.h"
+#include "streaming/input/input.h"
 #include "streaming/video/overlaymanager.h"
 #include "settings/appsettings.h"
 #include "settings/videooptions.h"
@@ -24,8 +25,8 @@ static const int s_PacingCount = 2;
 static const int kCustomMin = 256, kCustomMax = 7680, kCustomStep = 8;
 static const int kBitrateMinKbps = 5000, kBitrateStepKbps = 5000;
 
-StreamSettingsOverlay::StreamSettingsOverlay(StreamingPreferences* prefs)
-    : m_Prefs(prefs)
+StreamSettingsOverlay::StreamSettingsOverlay(StreamingPreferences* prefs, SdlInputHandler* input)
+    : m_Prefs(prefs), m_Input(input)
 {
 }
 
@@ -44,7 +45,7 @@ int StreamSettingsOverlay::effectiveHeight() const
     return isCustom() ? m_CustomH : m_ResValues.value(m_ResIndex).height();
 }
 
-int StreamSettingsOverlay::changeCount() const
+int StreamSettingsOverlay::reconnectCount() const
 {
     int n = 0;
     if (effectiveWidth() != m_BaseW || effectiveHeight() != m_BaseH) n++;
@@ -53,6 +54,11 @@ int StreamSettingsOverlay::changeCount() const
     if (m_Hdr != m_BaseHdr) n++;
     if (static_cast<int>(s_PacingValues[m_PacingIndex]) != m_BasePacing) n++;
     return n;
+}
+
+int StreamSettingsOverlay::changeCount() const
+{
+    return reconnectCount() + (m_PadMouse != m_BasePadMouse ? 1 : 0);
 }
 
 void StreamSettingsOverlay::rebuildRows()
@@ -67,6 +73,7 @@ void StreamSettingsOverlay::rebuildRows()
     m_Rows.append(ROW_BITRATE);
     m_Rows.append(ROW_HDR);
     m_Rows.append(ROW_PACING);
+    m_Rows.append(ROW_PADMOUSE);
     if (m_Focus >= m_Rows.size()) m_Focus = m_Rows.size() - 1;
     if (m_Focus < 0) m_Focus = 0;
 
@@ -75,8 +82,39 @@ void StreamSettingsOverlay::rebuildRows()
     while (m_Focus > 0 && isRowLocked(m_Rows[m_Focus])) m_Focus--;
 }
 
-void StreamSettingsOverlay::open()
+// The family of a pad's buttons, as SdlGamepadKeyNavigation::updateControllerType() reads it
+// for the rest of the app: Valve's own pads have no SDL type and are told by vendor, after the
+// Xbox cases, so Steam's virtual pad (Valve, typed Xbox 360) keeps the Xbox glyphs.
+static StreamingPreferences::GlyphSet glyphsFor(SDL_GameController* pad)
 {
+    if (pad == nullptr) {
+        return StreamingPreferences::GS_XBOX;
+    }
+    switch (SDL_GameControllerGetType(pad)) {
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+    case SDL_CONTROLLER_TYPE_PS5:
+        return StreamingPreferences::GS_PLAYSTATION;
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE:
+        return StreamingPreferences::GS_XBOX;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+        return StreamingPreferences::GS_NINTENDO;
+    default:
+        return SDL_GameControllerGetVendor(pad) == 0x28de ? StreamingPreferences::GS_STEAM
+                                                          : StreamingPreferences::GS_XBOX;
+    }
+}
+
+void StreamSettingsOverlay::open(SDL_GameController* pad)
+{
+    // The prompts: the forced set, or the family of the pad in hand. Before 8.3.0 Auto always
+    // meant Xbox here, while Settings' preview followed the pad.
+    m_Glyphs = m_Prefs->glyphSet != StreamingPreferences::GS_AUTO ? m_Prefs->glyphSet : glyphsFor(pad);
+
     // What this panel offers, read here so it matches what Settings offered before the
     // session started — including this machine's own display values.
     m_ResValues = VideoOptions::resolutions();
@@ -120,7 +158,10 @@ void StreamSettingsOverlay::open()
         if (s_PacingValues[i] == m_Prefs->framePacingMode) { m_PacingIndex = i; break; }
     }
 
+    m_PadMouse = m_Prefs->gamepadMouse;
+
     // Baseline = the values we'd apply right now (so opening shows "no changes").
+    m_BasePadMouse = m_PadMouse;
     m_BaseW = effectiveWidth();
     m_BaseH = effectiveHeight();
     m_BaseFps = currentFps();
@@ -171,28 +212,30 @@ void StreamSettingsOverlay::moveFocus(int delta)
     render();
 }
 
+// 8.3.0: the settings are a row of tiles, so left / right moves between them and up / down
+// changes the value — the other way round from the list this panel was until 8.2.0.
 void StreamSettingsOverlay::navUp()
 {
     if (!m_Active) return;
-    moveFocus(-1);
+    changeFocused(1);
 }
 
 void StreamSettingsOverlay::navDown()
 {
     if (!m_Active) return;
-    moveFocus(1);
+    changeFocused(-1);
 }
 
 void StreamSettingsOverlay::navLeft()
 {
     if (!m_Active) return;
-    changeFocused(-1);
+    moveFocus(-1);
 }
 
 void StreamSettingsOverlay::navRight()
 {
     if (!m_Active) return;
-    changeFocused(1);
+    moveFocus(1);
 }
 
 static int clampEven(int v)
@@ -235,6 +278,9 @@ void StreamSettingsOverlay::changeFocused(int delta)
     case ROW_PACING:
         m_PacingIndex = (m_PacingIndex + delta + s_PacingCount) % s_PacingCount;
         break;
+    case ROW_PADMOUSE:
+        m_PadMouse = !m_PadMouse;
+        break;
     }
     render();
 }
@@ -243,7 +289,14 @@ void StreamSettingsOverlay::apply()
 {
     if (!m_Active) return;
 
-    if (changeCount() > 0) {
+    // Mouse control (8.4.0) applies at once, on the input handler, and rides the session's
+    // preferences so a reconnect below — which builds the handler again — keeps it.
+    if (m_PadMouse != m_BasePadMouse) {
+        m_Prefs->gamepadMouse = m_PadMouse;
+        if (m_Input != nullptr) m_Input->setGamepadMouse(m_PadMouse);
+    }
+
+    if (reconnectCount() > 0) {
         // Keep the current frame pacing; only res/fps/bitrate/HDR change here.
         //
         // Do NOT "simplify" this to FP_OFF when V-Sync is off. The value passed
@@ -308,16 +361,6 @@ QString StreamSettingsOverlay::targetLabel() const
     }
 }
 
-QString StreamSettingsOverlay::saveLabel() const
-{
-    // North button glyph (Nintendo's north position is labelled X).
-    switch (m_Prefs->glyphSet) {
-    case StreamingPreferences::GS_PLAYSTATION: return QStringLiteral("Triangle");
-    case StreamingPreferences::GS_NINTENDO:    return QStringLiteral("X");
-    default:                                   return QStringLiteral("Y");
-    }
-}
-
 void StreamSettingsOverlay::writeCurrentTo(SaveTarget target, int hostSlot)
 {
     const int w = effectiveWidth();
@@ -326,6 +369,15 @@ void StreamSettingsOverlay::writeCurrentTo(SaveTarget target, int hostSlot)
     const int kbps = m_BitrateKbps;
     const int pacing = static_cast<int>(s_PacingValues[m_PacingIndex]);
     const bool hdr = m_Hdr;
+
+    // Mouse control is a global preference only — no profile or game layer has it — so it is
+    // saved there whatever the target of the rest.
+    if (m_PadMouse != StreamingPreferences::get()->gamepadMouse) {
+        StreamingPreferences::get()->gamepadMouse = m_PadMouse;
+        // MEMBER properties notify only when QML writes them: Settings → Input must hear it.
+        emit StreamingPreferences::get()->gamepadMouseChanged();
+        if (target != TARGET_GLOBAL) StreamingPreferences::get()->save();
+    }
 
     if (target == TARGET_GLOBAL) {
         StreamingPreferences* g = StreamingPreferences::get();
@@ -345,7 +397,7 @@ void StreamSettingsOverlay::writeCurrentTo(SaveTarget target, int hostSlot)
         return;
     }
 
-    // Read-modify-write so codec/audio/Hue overrides aren't clobbered.
+    // Read-modify-write so the codec/audio/other overrides aren't clobbered.
     AppOverride ov = (target == TARGET_GAME)
         ? AppSettingsManager::get()->getOverride(c->uuid, a.id)
         : HostProfileManager::get()->settings(c->uuid, hostSlot);
@@ -376,27 +428,6 @@ void StreamSettingsOverlay::save()
     apply();
 }
 
-QString StreamSettingsOverlay::confirmLabel() const
-{
-    // The confirm action is the SDL "south" button; the glyph printed on it
-    // differs per vendor (Nintendo swaps A/B vs Xbox position).
-    switch (m_Prefs->glyphSet) {
-    case StreamingPreferences::GS_PLAYSTATION: return QStringLiteral("Cross");
-    case StreamingPreferences::GS_NINTENDO:    return QStringLiteral("B");
-    default:                                   return QStringLiteral("A");
-    }
-}
-
-QString StreamSettingsOverlay::cancelLabel() const
-{
-    // The cancel action is the SDL "east" button.
-    switch (m_Prefs->glyphSet) {
-    case StreamingPreferences::GS_PLAYSTATION: return QStringLiteral("Circle");
-    case StreamingPreferences::GS_NINTENDO:    return QStringLiteral("A");
-    default:                                   return QStringLiteral("B");
-    }
-}
-
 static QString aspectRatio(int w, int h)
 {
     if (h <= 0) return QString();
@@ -415,8 +446,8 @@ static QString aspectRatio(int w, int h)
 }
 
 // Resource path of the self-contained vendor button glyph for an SDL position
-// ('s' = south/confirm, 'e' = east/cancel, 'n' = north/save). GS_AUTO follows
-// the Xbox layout, matching the rest of the overlay's existing label defaults.
+// ('s' = south/confirm, 'e' = east/cancel, 'n' = north/save), for a family resolved by
+// open() — never GS_AUTO.
 static QString padIcon(StreamingPreferences::GlyphSet gs, char pos)
 {
     switch (gs) {
@@ -428,6 +459,10 @@ static QString padIcon(StreamingPreferences::GlyphSet gs, char pos)
         return pos == 's' ? QStringLiteral(":/res/pad_switch_b.svg")
              : pos == 'e' ? QStringLiteral(":/res/pad_switch_a.svg")
              :              QStringLiteral(":/res/pad_switch_x.svg");
+    case StreamingPreferences::GS_STEAM:
+        return pos == 's' ? QStringLiteral(":/res/pad_steam_a.svg")
+             : pos == 'e' ? QStringLiteral(":/res/pad_steam_b.svg")
+             :              QStringLiteral(":/res/pad_steam_y.svg");
     default: // Xbox / Auto
         return pos == 's' ? QStringLiteral(":/res/pad_xbox_a.svg")
              : pos == 'e' ? QStringLiteral(":/res/pad_xbox_b.svg")
@@ -440,7 +475,8 @@ void StreamSettingsOverlay::render()
     if (!m_Active) return;
 
     Overlay::OverlayPanel panel;
-    panel.title = QStringLiteral("STREAM SETTINGS");
+    panel.title = QStringLiteral("Stream settings");
+    panel.subtitle = QStringLiteral("Applies to this stream");
 
     // Header chip: the active save target (where a LIVE badge would otherwise go),
     // tinted by layer — game (amber) / host profile (cyan) / global (grey).
@@ -453,6 +489,21 @@ void StreamSettingsOverlay::render()
     default:          panel.badgeColor = {0x9A, 0xA0, 0xA6, 0xFF}; break;
     }
 
+    // What the stream runs with now, per row: a tile whose value differs carries the amber dot.
+    auto changed = [&](int rowId) {
+        switch (rowId) {
+        case ROW_RES:
+        case ROW_CUSTOM_W:
+        case ROW_CUSTOM_H: return effectiveWidth() != m_BaseW || effectiveHeight() != m_BaseH;
+        case ROW_FPS:      return currentFps() != m_BaseFps;
+        case ROW_BITRATE:  return m_BitrateKbps != m_BaseKbps;
+        case ROW_HDR:      return m_Hdr != m_BaseHdr;
+        case ROW_PACING:   return !isRowLocked(ROW_PACING) && static_cast<int>(s_PacingValues[m_PacingIndex]) != m_BasePacing;
+        case ROW_PADMOUSE: return m_PadMouse != m_BasePadMouse;
+        }
+        return false;
+    };
+
     auto addRow = [&](int rowId, const QString& label, const QString& value,
                       const QString& hint = QString(), bool indent = false) {
         const bool locked = isRowLocked(rowId);
@@ -460,12 +511,13 @@ void StreamSettingsOverlay::render()
         r.label = label;
         r.value = value;
         r.hint = hint;
-        // A locked row can't be changed, so it gets no ‹ › affordance and is
+        // A locked row can't be changed, so it gets no ▲▼ affordance and is
         // never drawn as the selection (navigation skips it).
         r.showArrows = !locked;
         r.dimmed = locked;
         r.indent = indent;
         r.selected = !locked && (m_Rows[m_Focus] == rowId);
+        r.changed = changed(rowId);
         panel.rows.append(r);
     };
 
@@ -502,6 +554,13 @@ void StreamSettingsOverlay::render()
         case ROW_BITRATE:
             addRow(ROW_BITRATE, QStringLiteral("Bitrate"),
                    QStringLiteral("%1 Mbps").arg(qRound(m_BitrateKbps / 1000.0)));
+            // On a gauge: where it sits between the lowest and the highest this codec allows.
+            {
+                const int maxKbps = StreamingPreferences::getMaxBitrate(m_Prefs->videoCodecConfig);
+                if (maxKbps > kBitrateMinKbps) {
+                    panel.rows.last().gauge = double(m_BitrateKbps - kBitrateMinKbps) / (maxKbps - kBitrateMinKbps);
+                }
+            }
             break;
         case ROW_HDR:
             addRow(ROW_HDR, QStringLiteral("HDR"),
@@ -510,33 +569,42 @@ void StreamSettingsOverlay::render()
         case ROW_PACING:
             if (isRowLocked(ROW_PACING)) {
                 const bool vrr = Session::get()->isVrrActive();
+                // Locked, and saying so — with the padlock OverlayManager draws on a dimmed tile.
                 addRow(ROW_PACING, QStringLiteral("Frame pacing"),
                        vrr ? QStringLiteral("On") : QStringLiteral("Off"),
-                       vrr ? QStringLiteral("VRR") : QStringLiteral("V-Sync off"));
+                       vrr ? QStringLiteral("Locked by VRR") : QStringLiteral("Locked: V-Sync off"));
             }
             else {
                 addRow(ROW_PACING, QStringLiteral("Frame pacing"),
                        QString::fromLatin1(s_PacingLabels[m_PacingIndex]));
             }
             break;
+        case ROW_PADMOUSE:
+            addRow(ROW_PADMOUSE, QStringLiteral("Mouse control"),
+                   m_PadMouse ? QStringLiteral("On") : QStringLiteral("Off"),
+                   QStringLiteral("hold Start"));
+            break;
         }
     }
 
     int n = changeCount();
     if (n > 0) {
-        panel.statusLine = QStringLiteral("%1 change%2 · Apply briefly reconnects")
-            .arg(n).arg(n > 1 ? QStringLiteral("s") : QString());
-        panel.statusColor = {0xF5, 0x9E, 0x0B, 0xFF};
+        // Mouse control alone applies at once; anything else needs the reconnect.
+        panel.statusLine = QStringLiteral("%1 change%2 · %3")
+            .arg(n).arg(n > 1 ? QStringLiteral("s") : QString())
+            .arg(reconnectCount() > 0 ? QStringLiteral("Apply briefly reconnects")
+                                      : QStringLiteral("Applies at once"));
+        panel.statusColor = {0xF5, 0xA6, 0x23, 0xFF};   // the theme's warning, as the tiles' dots
     } else {
         panel.statusLine = QStringLiteral("No changes");
-        panel.statusColor = {0x80, 0x80, 0x80, 0xFF};
+        panel.statusColor = {0x75, 0x87, 0x90, 0xFF};   // the theme's text3
     }
 
     // Footer: vendor-accurate controller button glyphs.
     Overlay::OverlayBadge apply, cancel, saveBadge;
-    apply.iconPath  = padIcon(m_Prefs->glyphSet, 's'); apply.label  = QStringLiteral("Apply");
-    cancel.iconPath = padIcon(m_Prefs->glyphSet, 'e'); cancel.label = QStringLiteral("Cancel");
-    saveBadge.iconPath = padIcon(m_Prefs->glyphSet, 'n'); saveBadge.label = QStringLiteral("Save");
+    apply.iconPath  = padIcon(m_Glyphs, 's'); apply.label  = QStringLiteral("Apply");
+    cancel.iconPath = padIcon(m_Glyphs, 'e'); cancel.label = QStringLiteral("Cancel");
+    saveBadge.iconPath = padIcon(m_Glyphs, 'n'); saveBadge.label = QStringLiteral("Save");
     panel.footerBadges.append(apply);
     panel.footerBadges.append(cancel);
     panel.footerBadges.append(saveBadge);

@@ -112,6 +112,8 @@ public:
     int serverCodecModeSupport;
     // Optional paired-host /serverinfo extension; zero means unknown.
     uint32_t pyrowaveHostLinkMbps = 0;
+    // The host offers the PyroWave Test's UDP probe (7.0.0; Vibeshine/Vibepollo 2.0.1+).
+    bool pyrowaveTestable = false;
     QString gpuModel;
     bool isSupportedServerVersion;
     // Transient: when true, uniqueAddresses() returns tailscaleAddress first so the
@@ -130,6 +132,12 @@ public:
     // LAN path is unreachable (remote). Persisted; not overwritten by update().
     NvAddress tailscaleAddress;
     QByteArray macAddress;
+    // A second network card that can wake this PC (8.1.0, issue #45), typed by the user.
+    // macAddress is the card /serverinfo answers on — the one the host streams on — and it
+    // is rewritten on every poll, so a MAC the user chose lives here instead. The magic packet
+    // goes to both: a wrong one costs nothing and cannot break a wake that already worked.
+    // Empty = none. Persisted; not overwritten by update().
+    QByteArray wakeMacAddress;
     QString name;
     bool hasCustomName;
     QString uuid;
@@ -152,10 +160,14 @@ public:
     // It lives on the host and not on a profile deliberately: "docked" and "handheld" are
     // two ways of using the SAME host and must look the same. Same reasoning, and the same
     // storage, as tailscaleAddress above.
+    // 7.0.0: a picture only. The colour a host used to have (a hue from the name, a picked
+    // swatch, a pair derived from the picture) was dropped: the card is the theme's surface.
     QString stageImagePath;
-    QString stageSeedColor;    // "#rrggbb", empty when the source is a picture or unset
-    QString stageColorFrom;    // derived, "#rrggbb"
-    QString stageColorTo;      // derived, "#rrggbb"
+    // The picture for the Light theme (13/10/2026): each theme keeps its own. Until one is chosen
+    // in Light (stageImageLightSet false) Light shows the Dark one, so an update changes nothing;
+    // once set — even to nothing, by Clear — it is Light's own.
+    QString stageImagePathLight;
+    bool stageImageLightSet = false;
     // How opaque this host's card is on Home, in percent (6.0.0), so the waves of the
     // app's floor can show through it. 0 means never set, and reads as the default — which
     // is how every host saved before 6.0.0 arrives, with no migration. The range and the

@@ -1,5 +1,6 @@
 #include "appmodel.h"
 
+#include "backend/librarysearch.h"
 #include "settings/appsettings.h"
 #include "settings/playtime.h"
 #include "settings/streamingpreferences.h"
@@ -115,6 +116,25 @@ void AppModel::setCategory(const QString& category)
     emit categoryChanged();
 }
 
+bool AppModel::setFilterText(const QString& text)
+{
+    if (text == m_FilterText) {
+        return false;
+    }
+    m_FilterText = text;
+
+    // Text that changes no word leaves the rows alone. A reset would put the cursor back on
+    // the first result in the middle of typing "half life".
+    const QStringList tokens = LibrarySearch::searchTokens(text);
+    const bool rebuilt = tokens != m_FilterTokens;
+    if (rebuilt) {
+        m_FilterTokens = tokens;
+        rebuildVisibleApps();
+    }
+    emit filterTextChanged();
+    return rebuilt;
+}
+
 void AppModel::rebuildVisibleApps()
 {
     // A reset, and the visible list rebuilt from scratch: switching tabs replaces every row,
@@ -145,6 +165,11 @@ bool AppModel::matchesCategory(const NvApp& app) const
         return isAllCategory(app);
     }
     return isApp(app) == (m_Category == QLatin1String("apps"));
+}
+
+bool AppModel::matchesFilter(const NvApp& app) const
+{
+    return LibrarySearch::matchesSearch(app.name, m_FilterTokens);
 }
 
 bool AppModel::isApp(const NvApp& app) const
@@ -258,18 +283,18 @@ QVariantMap AppModel::getAppOverride(int appIndex)
         AppSettingsManager::get()->getOverride(m_Computer->uuid, m_VisibleApps.at(appIndex).id));
 }
 
-QVariantMap AppModel::inheritedLabels() const
+QVariantMap AppModel::inheritedValues() const
 {
     if (m_Computer == nullptr) {
         return QVariantMap();
     }
-
     // Same two steps buildPrefs() takes, minus the third: global, then the host's active
     // profile. Reusing buildPrefs() itself would fold the game's own overrides in and the
     // dialog would end up quoting the user their own answer back as what they inherit.
     QScopedPointer<StreamingPreferences> p(StreamingPreferences::get()->clone());
     applyAppOverride(p.data(), HostProfileManager::get()->activeOverride(m_Computer->uuid));
-    return inheritedValueLabels(p.data());
+    // ::inheritedValues, the free function in settings/appsettings.h, not this member.
+    return ::inheritedValues(p.data());
 }
 
 void AppModel::setAppOverride(int appIndex, const QVariantMap& src)
@@ -590,7 +615,9 @@ QVector<NvApp> AppModel::getVisibleApps(const QVector<NvApp>& appList)
         // Don't immediately hide games that were previously visible. This
         // allows users to easily uncheck the "Hide App" checkbox if they
         // check it by mistake.
-        if (!matchesCategory(app)) {
+        // The search applies here, not only on a rebuild, so a poll during a search inserts
+        // only what matches.
+        if (!matchesCategory(app) || !matchesFilter(app)) {
             continue;
         }
         if (m_ShowHiddenGames || !app.hidden || isAppCurrentlyVisible(app)) {
@@ -714,51 +741,6 @@ bool AppModel::sortVisibleApps()
     m_VisibleApps = sorted;
     endResetModel();
     return true;
-}
-
-void AppModel::setAppHidden(int appIndex, bool hidden)
-{
-    Q_ASSERT(appIndex < m_VisibleApps.count());
-    int appId = m_VisibleApps.at(appIndex).id;
-
-    {
-        QWriteLocker lock(&m_Computer->lock);
-
-        for (NvApp& app : m_Computer->appList) {
-            if (app.id == appId) {
-                app.hidden = hidden;
-                break;
-            }
-        }
-    }
-
-    m_ComputerManager->clientSideAttributeUpdated(m_Computer);
-}
-
-void AppModel::setAppDirectLaunch(int appIndex, bool directLaunch)
-{
-    Q_ASSERT(appIndex < m_VisibleApps.count());
-    int appId = m_VisibleApps.at(appIndex).id;
-
-    {
-        QWriteLocker lock(&m_Computer->lock);
-
-        for (NvApp& app : m_Computer->appList) {
-            if (directLaunch) {
-                // We must clear direct launch from all other apps
-                // to set it on the new app.
-                app.directLaunch = app.id == appId;
-            }
-            else if (app.id == appId) {
-                // If we're clearing direct launch, we're done once we
-                // find our matching app ID.
-                app.directLaunch = false;
-                break;
-            }
-        }
-    }
-
-    m_ComputerManager->clientSideAttributeUpdated(m_Computer);
 }
 
 void AppModel::handleComputerStateChanged(NvComputer* computer)

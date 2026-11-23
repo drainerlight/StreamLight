@@ -21,12 +21,26 @@ import QtQuick.Layouts 1.3
 // A host older than 8.6.0 cannot answer POWERCAPS, so its row offers Shut down only — the
 // power-off it always understood — and the caller sends it the old SHUTDOWN.
 //
+// ⚠️ 8.8.4: no "Install updates" switch any more. "Updates pending" is read from RebootPending /
+// RebootRequired — updates already installed and waiting for a RESTART — and the switch sent
+// InitiateShutdown with SHUTDOWN_INSTALL_UPDATES, which only installs updates staged for a shut
+// down: on these it did nothing (the SER9 shut down with it on 15 and 16/11/2026 and the update
+// stayed until Windows forced a restart on 22/11). A restart finishes them anyway, so with updates
+// waiting the Restart segment reads "Update & restart" and a Shut down says they stay pending
+// (variant B of docs/mockups/power). Same for the host: StreamTweak uses the same probe.
+//
 // Standalone Popup, so the focus chain is ours for pad and keyboard:
-//   host row ⇅ host updates ⇅ device row ⇅ device updates ⇅ Confirm ⇄ Cancel
+//   host row ⇅ device row ⇅ Confirm ⇄ Cancel
 // Dialog convention (§22): affirmative on the LEFT, accent reserved for focus, and the
 // dismissive button (Cancel) focused first.
 Popup {
     id: pop
+
+    // 7.0.0: the shared spring in and quick out (PopEnter/PopExit), off with Reduce animations.
+    // Grows up out of the Options grid it is opened from (7.0.0).
+    transformOrigin: Popup.Bottom
+    enter: PopEnter { fromScale: 0.6 }
+    exit: PopExit {}
 
     // Shared dialog measurements — see Theme.uiScale.
     readonly property real _u: Theme.uiScale
@@ -63,8 +77,20 @@ Popup {
     property string hostUpdateState: "unavailable"
     property string clientUpdateState: "none"
 
+    // 8.5.1, issue #51: the modes last confirmed on this host (ComputerModel.hostPowerChoice),
+    // set by HomeScreen before open(); empty = none, and always empty in clientOnly mode. The
+    // popup opens on them where the machine still offers them — the host's only once POWERCAPS
+    // has answered — and on the old Keep on / Shut down otherwise. Focus stays on Cancel.
+    property string rememberedHost: ""
+    property string rememberedClient: ""
+    // Whether hostMode / clientMode are a choice the user could make, so the caller does not
+    // store a "keep" that only meant "this row had nothing to offer".
+    readonly property bool hostChoiceMade:   _hostSelectable
+    readonly property bool clientChoiceMade: clientModes.length > 0
+
     // Emitted on confirm. A mode is one of _keys; "keep" means leave that machine alone.
-    // The update flags are only ever true for restart/shutdown on a side with updates pending.
+    // The update flags are only ever true for a restart on a side with updates pending — never
+    // for a shut down, where the flag installs nothing we detect (8.8.4, see the header).
     signal confirmed(string hostMode, bool hostUpdates, string clientMode, bool clientUpdates)
 
     // ── Modes ─────────────────────────────────────────────────────────────────
@@ -72,6 +98,10 @@ Popup {
     // machine lacks is hidden, not removed.
     readonly property var _keys:   ["keep", "sleep", "restart", "shutdown"]
     readonly property var _labels: [qsTr("Keep on"), qsTr("Sleep"), qsTr("Restart"), qsTr("Shut down")]
+    // 8.8.4: with updates waiting for a restart, Restart says what it will do.
+    function _labelsFor(pending) {
+        return pending ? [_labels[0], _labels[1], qsTr("Update & restart"), _labels[3]] : _labels
+    }
 
     function _hiddenFor(modes) {
         var hidden = []
@@ -89,9 +119,12 @@ Popup {
     readonly property string hostMode:   _hostSelectable ? _keys[hostSel.currentIndex] : "keep"
     readonly property string clientMode: clientModes.length > 0 ? _keys[clientSel.currentIndex] : "keep"
 
-    function _canUpdate(mode) { return mode === "restart" || mode === "shutdown" }
-    readonly property bool _hostUpdOffered:   pop._canUpdate(hostMode)   && hostUpdateState === "pending"
-    readonly property bool _clientUpdOffered: pop._canUpdate(clientMode) && clientUpdateState === "pending"
+    readonly property bool _hostPending:   hostAllowed && hostUpdateState === "pending"
+    readonly property bool _clientPending: clientUpdateState === "pending"
+    // The restart finishes them with or without the flag; it is still sent, so updates staged
+    // for a shut down (which we cannot detect) go in too.
+    readonly property bool _hostUpdates:   hostMode === "restart"   && _hostPending
+    readonly property bool _clientUpdates: clientMode === "restart" && _clientPending
 
     readonly property bool _nothingToDo: hostMode === "keep" && clientMode === "keep"
 
@@ -104,10 +137,10 @@ Popup {
         return ""
     }
 
-    function _phrase(name, mode, updates) {
+    function _phrase(name, mode, pending) {
         var verb = mode === "sleep"     ? qsTr("sleeps")
-                 : mode === "restart"   ? (updates ? qsTr("updates and restarts") : qsTr("restarts"))
-                 :                        (updates ? qsTr("updates and shuts down") : qsTr("shuts down"))
+                 : mode === "restart"   ? (pending ? qsTr("restarts and updates") : qsTr("restarts"))
+                 :                        (pending ? qsTr("shuts down · updates stay pending") : qsTr("shuts down"))
         return "<b>" + name + "</b> " + verb
     }
     readonly property string _clientLabel: {
@@ -117,17 +150,16 @@ Popup {
     readonly property string _summary: {
         var parts = []
         if (hostMode !== "keep")
-            parts.push(_phrase(hostName.length > 0 ? hostName : qsTr("Host"), hostMode, _hostUpdOffered && hostUpd.checked))
+            parts.push(_phrase(hostName.length > 0 ? hostName : qsTr("Host"), hostMode, _hostPending))
         if (clientMode !== "keep")
-            parts.push(_phrase(_clientLabel, clientMode, _clientUpdOffered && clientUpd.checked))
+            parts.push(_phrase(_clientLabel, clientMode, _clientPending))
         return parts.length > 0 ? parts.join(qsTr(" · then ")) : qsTr("Nothing to do")
     }
 
     function _commit() {
         if (pop._nothingToDo)
             return
-        pop.confirmed(pop.hostMode,   pop._hostUpdOffered && hostUpd.checked,
-                      pop.clientMode, pop._clientUpdOffered && clientUpd.checked)
+        pop.confirmed(pop.hostMode, pop._hostUpdates, pop.clientMode, pop._clientUpdates)
         pop.close()
     }
 
@@ -135,9 +167,7 @@ Popup {
     function _chain() {
         var c = []
         if (hostSel.visible)   c.push(hostSel)
-        if (hostUpd.visible)   c.push(hostUpd)
         if (clientSel.visible) c.push(clientSel)
-        if (clientUpd.visible) c.push(clientUpd)
         c.push(cancelBtn)
         return c
     }
@@ -150,7 +180,7 @@ Popup {
 
     function _updateChip(state) {
         switch (state) {
-        case "pending":  return qsTr("Updates pending")
+        case "pending":  return qsTr("Restart to update")
         case "none":     return qsTr("Up to date")
         case "checking": return qsTr("Checking…")
         }
@@ -225,28 +255,6 @@ Popup {
         }
     }
 
-    // "Install updates" with its Off/On pills, under a row that restarts or shuts down.
-    // ⚠️ OnOffSelector never writes `checked` itself (it is meant to be bound to a setting);
-    // here the pills ARE the state, so onToggled stores it.
-    component UpdateRow: RowLayout {
-        property alias selector: pills
-        Layout.alignment: Qt.AlignHCenter
-        spacing: pop._px(12)
-        WinMark { Layout.alignment: Qt.AlignVCenter; Layout.rightMargin: -pop._px(4) }
-        Label {
-            text: qsTr("Install updates")
-            font.family: Theme.family; font.pixelSize: pop._px(Theme.fontSmall)
-            color: Theme.text2
-            Layout.alignment: Qt.AlignVCenter
-        }
-        OnOffSelector {
-            id: pills
-            onToggled: function(value) { pills.checked = value }
-            Keys.onUpPressed:   function(event) { pop._step(pills, -1); event.accepted = true }
-            Keys.onDownPressed: function(event) { pop._step(pills,  1); event.accepted = true }
-        }
-    }
-
     contentItem: ColumnLayout {
         spacing: pop._px(18)
 
@@ -276,7 +284,7 @@ Popup {
             SegmentedSelector {
                 id: hostSel
                 visible: pop._hostSelectable
-                labels: pop._labels
+                labels: pop._labelsFor(pop._hostPending)
                 Layout.alignment: Qt.AlignHCenter
                 hiddenIndices: pop._hiddenFor(pop._hostOffer)
                 Keys.onUpPressed:   function(event) { pop._step(hostSel, -1); event.accepted = true }
@@ -301,11 +309,6 @@ Popup {
                 color: Theme.warning
                 Layout.alignment: Qt.AlignHCenter
             }
-
-            UpdateRow {
-                id: hostUpdRow
-                visible: pop._hostUpdOffered
-            }
         }
 
         // ── This device ───────────────────────────────────────────────────────
@@ -323,7 +326,7 @@ Popup {
             SegmentedSelector {
                 id: clientSel
                 visible: pop.clientModes.length > 0
-                labels: pop._labels
+                labels: pop._labelsFor(pop._clientPending)
                 Layout.alignment: Qt.AlignHCenter
                 hiddenIndices: pop._hiddenFor(pop.clientModes)
                 Keys.onUpPressed:   function(event) { pop._step(clientSel, -1); event.accepted = true }
@@ -336,11 +339,6 @@ Popup {
                 font.family: Theme.family; font.pixelSize: pop._px(Theme.fontSmall)
                 color: Theme.text3
                 Layout.alignment: Qt.AlignHCenter
-            }
-
-            UpdateRow {
-                id: clientUpdRow
-                visible: pop._clientUpdOffered
             }
         }
 
@@ -379,17 +377,17 @@ Popup {
                     implicitHeight: pop._px(42)
                     radius: pop._px(8)
                     opacity: confirmBtn.enabled ? 1.0 : 0.4
-                    color: confirmBtn.activeFocus ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.20)
-                         : confirmBtn.hovered     ? Qt.rgba(1, 1, 1, 0.05)
-                         :                          Theme.card
-                    border.color: confirmBtn.activeFocus ? Theme.accent
+                    color: confirmBtn.activeFocus ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.22)
+                         : confirmBtn.hovered     ? Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.15)
+                         :                          Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
+                    border.color: confirmBtn.activeFocus ? Theme.accentFill
                                 : confirmBtn.hovered     ? Theme.lineHigh
-                                :                          Theme.line
+                                :                          Theme.lineHigh
                     border.width: confirmBtn.activeFocus ? 2 : 1
                 }
                 contentItem: Label {
                     text: confirmBtn.text
-                    color: Theme.accent
+                    color: Theme.inkText
                     opacity: confirmBtn.enabled ? 1.0 : 0.4
                     font.family: Theme.family
                     font.pixelSize: pop._px(Theme.fontBody)
@@ -414,12 +412,12 @@ Popup {
                     implicitWidth: pop._px(140)
                     implicitHeight: pop._px(42)
                     radius: pop._px(8)
-                    color: cancelBtn.activeFocus ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.20)
-                         : cancelBtn.hovered     ? Qt.rgba(1, 1, 1, 0.05)
-                         :                         Theme.card
-                    border.color: cancelBtn.activeFocus ? Theme.accent
+                    color: cancelBtn.activeFocus ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.22)
+                         : cancelBtn.hovered     ? Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.15)
+                         :                         Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
+                    border.color: cancelBtn.activeFocus ? Theme.accentFill
                                 : cancelBtn.hovered     ? Theme.lineHigh
-                                :                         Theme.line
+                                :                         Theme.lineHigh
                     border.width: cancelBtn.activeFocus ? 2 : 1
                 }
                 contentItem: Label {
@@ -435,19 +433,50 @@ Popup {
         }
     }
 
-    // The two update selectors, named for the focus chain and _commit(). Read out of the
-    // UpdateRow instances, so the rows stay one component.
-    readonly property var hostUpd:   hostUpdRow.selector
-    readonly property var clientUpd: clientUpdRow.selector
+    // Where a remembered mode lands: its index when this machine offers it now, else -1.
+    // "keep" is always offered.
+    function _rememberedIndex(key, offer) {
+        if (key === "keep") return 0
+        var i = pop._keys.indexOf(key)
+        return i > 0 && offer.indexOf(key) >= 0 ? i : -1
+    }
 
-    // Every open starts from the same safe state: the host kept on, this device shut down
-    // (the old default target, Client), no updates, focus on Cancel (§22).
+    // The host's row is set once per open, as soon as it has something to offer: POWERCAPS
+    // may answer before onOpened (fast LAN, the enter animation still running) or after it.
+    // ⚠️ Worked out here from hostCaps / hostModes / hostAllowed, NOT from _hostSelectable and
+    // _hostOffer: inside onHostCapsChanged those bindings may not have been re-evaluated yet,
+    // so they still said "checking" — the row was skipped and nothing called it again (the
+    // host stayed on Keep on while this device's row, which waits for nothing, was right).
+    property bool _hostRowSet: false
+    function _setHostRow() {
+        if (pop._hostRowSet || pop.clientOnly || !pop.hostAllowed)
+            return
+        var offer = pop.hostCaps === "legacy" ? ["shutdown"]
+                  : pop.hostCaps === "ready"  ? pop.hostModes : []
+        if (offer.length === 0)
+            return
+        pop._hostRowSet = true
+        var i = pop._rememberedIndex(pop.rememberedHost, offer)
+        hostSel.currentIndex = i >= 0 ? i : 0
+    }
+    onHostCapsChanged:  if (pop.opened) pop._setHostRow()
+    onHostModesChanged: if (pop.opened) pop._setHostRow()
+
+    // Every open starts from the last choice confirmed on this host (8.5.1, issue #51), or
+    // without one from the old safe state: the host kept on, this device shut down. Focus
+    // always on Cancel (§22), so a press out of habit does nothing.
     onOpened: {
         hostSel.currentIndex = 0
-        var off = pop._keys.indexOf("shutdown")
-        clientSel.currentIndex = pop.clientModes.indexOf("shutdown") >= 0 ? off : 0
-        hostUpd.checked = false
-        clientUpd.checked = false
+        pop._hostRowSet = false
+        pop._setHostRow()
+
+        var c = pop._rememberedIndex(pop.rememberedClient, pop.clientModes)
+        if (c < 0) {
+            var off = pop._keys.indexOf("shutdown")
+            c = pop.clientModes.indexOf("shutdown") >= 0 ? off : 0
+        }
+        clientSel.currentIndex = c
+
         cancelBtn.forceActiveFocus()
     }
     onClosed: {

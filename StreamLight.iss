@@ -1,4 +1,4 @@
-; StreamLight 6.4.1 — Moonlight fork with StreamTweak integration.
+; StreamLight 8.8.4 — Moonlight fork with StreamTweak integration.
 ; SourceDir is the self-contained runtime built by build-arch.bat +
 ; manual windeployqt (see CLAUDE.md §3).
 #define AppName "StreamLight"
@@ -11,11 +11,34 @@
 ; Reading version.txt from here was considered and left alone: that file carries a UTF-8
 ; BOM and no trailing newline, so an ISPP FileRead would have to skip three bytes by
 ; position, which is a more fragile thing than one line to remember at release time.
-#define AppVersion "6.4.1"
+#define AppVersion "8.8.4"
 #define AppPublisher "FoggyBytes"
 #define AppURL "https://github.com/FoggyBytes/StreamLight"
 #define AppExeName "StreamLight.exe"
 #define SourceDir "build\deploy-x64-release"
+
+; ── Microsoft Visual C++ Runtime (msvcp140/vcruntime140) ─────────────────────────────────
+; The app and Qt are built /MD and the deploy directory carries no runtime
+; (build-arch.bat runs windeployqt --no-compiler-runtime), so StreamLight runs on whatever
+; msvcp140.dll the machine has. That stopped being safe with 7.0.0: Qt 6.12 is built with
+; MSVC 14.44 and uses the constexpr std::mutex constructor from 14.40 (its DLLs no longer
+; import _Mtx_init_in_situ; Qt 6.8.3's did), and an older msvcp140.dll dereferences null in
+; _Mtx_lock. The exe itself is built with 14.51. Microsoft's rule is that the runtime must be
+; at least as new as the newest toolset in the process. Upstream's WiX bundle ships VC_redist
+; for the same reason (wix/MoonlightSetup/Bundle.wxs); this installer never did.
+;
+; The redistributable is taken from the toolset that builds the exe, never from a copy kept in
+; the repo: when Visual Studio moves to a new toolset this folder goes away and the compile
+; stops here, instead of shipping a runtime older than the code. Update the path then — the
+; minimum version follows by itself, read from the file below.
+; The GitHub Actions build passes its own with /DVCRedist=…, the runner's toolset being another.
+#ifndef VCRedist
+  #define VCRedist "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Redist\MSVC\14.51.36231\vc_redist.x64.exe"
+#endif
+#if !FileExists(VCRedist)
+  #error VC_redist not found: point VCRedist at the Redist folder of the toolset that builds StreamLight.exe
+#endif
+#define VCRedistVersion GetVersionNumbersString(VCRedist)
 
 [Setup]
 AppId={{B7A2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -51,6 +74,25 @@ SetupArchitecture=x64
 ; running it under x64 emulation is a plausible scenario.
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
+; Product version "7.0.1.0", as StreamLight.exe and AntiHooking.dll carry it (qmake writes four
+; parts): SignPath requires the same product name and version on every file it signs, and
+; without these lines Setup said "7.0.1" and had no file version at all.
+VersionInfoVersion={#AppVersion}.0
+VersionInfoProductTextVersion={#AppVersion}.0
+; Signed uninstaller, switched on only by the GitHub Actions build when it signs
+; (/DSignUninstaller). The uninstaller is not only unins000.exe: it is the same binary as the
+; Setup program the loader unpacks to %TEMP% and runs during the install, so an unsigned one
+; leaves Smart App Control something unsigned to stop even with a signed Setup.exe. With no
+; SignTool, Inno works in two passes: the first compile writes uninst-<version>-<hash>.e64 into
+; SignedUninstallerDir and stops; once that file is signed, the second compile copies the
+; signature in. Local builds never define SignUninstaller and compile as before.
+#ifdef SignUninstaller
+  #ifndef SignedUninstallerDir
+    #define SignedUninstallerDir "build\signing\uninstaller"
+  #endif
+SignedUninstaller=yes
+SignedUninstallerDir={#SignedUninstallerDir}
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -62,6 +104,24 @@ WelcomeLabel2=
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "xboxtile"; Description: "Add an icon to the Xbox app's 'My apps' section"; GroupDescription: "{cm:AdditionalIcons}"
+
+[InstallDelete]
+; 7.0.1 (issue #40): the Qt plugin folders are emptied before [Files] copies them again.
+; Without this a plugin a release no longer ships stays behind forever, and a stale one
+; can break a Qt upgrade: a 2024 tls\qopensslbackend.dll, left by an old install, does not
+; load under Qt 6.12 (it imports QTlsBackend::addTustedRoot, no longer exported), Qt stops
+; loading TLS plugins at the first one that fails, so qschannelbackend.dll is never reached
+; and StreamLight dies at startup on the "cert-only" backend. Every folder below is rebuilt
+; in full from the deploy directory; settings and cache live outside {app}.
+Type: filesandordirs; Name: "{app}\tls"
+Type: filesandordirs; Name: "{app}\platforms"
+Type: filesandordirs; Name: "{app}\imageformats"
+Type: filesandordirs; Name: "{app}\iconengines"
+Type: filesandordirs; Name: "{app}\networkinformation"
+Type: filesandordirs; Name: "{app}\qml"
+; 8.3.0: SDL2_ttf.dll is no longer shipped (the overlays are painted with QPainter). An upgrade
+; would otherwise keep the 8.2.0 copy in {app} for good.
+Type: files; Name: "{app}\SDL2_ttf.dll"
 
 [Files]
 ; portable.dat excluded: it would force Qt to write settings/cache to {app}
@@ -79,7 +139,13 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\gamecontrollerdb.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "installer\resources\streamlight.png"; Flags: dontcopy
+; Extracted and run by InstallVCRedist in [Code], only when the machine's runtime is older.
+Source: "{#VCRedist}"; Flags: dontcopy
 Source: "changelog.txt"; DestDir: "{app}"; Flags: ignoreversion
+; 7.0.0 (issue #38): the four pictures for StreamLight's non-Steam shortcut, for anyone who
+; assigns them by hand in Steam. Settings → Interface → Steam artwork writes the same ones
+; (embedded in the exe from the same files) into Steam's grid folder by itself.
+Source: "app\res\steam\*.png"; DestDir: "{app}\Steam artwork"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -112,12 +178,32 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Filename: "{app}\{#AppExeName}"; Parameters: "--register-xbox-tile"; \
     Tasks: xboxtile; \
     Flags: runhidden waituntilterminated runasoriginaluser
-; This entry is also how the in-app update (app/backend/appupdate.cpp) reopens the app: the
-; update runs this setup visibly, with no switches, so its last page carries this box. There
-; used to be a second, silent-only entry gated on a /SELFUPDATE switch; it went when the update
-; stopped running Setup /VERYSILENT (14/09/2026).
+; The box on the last page of a manual install. ⚠️ Not how the in-app update reopens the app
+; (5.8.0–8.5.x it was): since 8.6.0 StreamLightUpdater.exe runs this setup /VERYSILENT /APPUPDATE
+; and reopens StreamLight itself, as the user — started by the updater, this setup is already
+; elevated, and its runasoriginaluser would start StreamLight elevated too. skipifsilent keeps
+; this entry out of it.
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; \
     Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; 8.4.0: the TV service's pairing (it holds the key the TV granted) and, since 8.5.0, its log
+; folder. The service itself is stopped and deleted in CurUninstallStepChanged, before this runs.
+Type: filesandordirs; Name: "{commonappdata}\FoggyBytes\StreamLight\service"
+Type: filesandordirs; Name: "{commonappdata}\FoggyBytes\StreamLight\logs"
+; 8.6.0: the updater's work folder and its status (RegisterUpdater in [Code]).
+Type: filesandordirs; Name: "{commonappdata}\FoggyBytes\StreamLight\update"
+Type: filesandordirs; Name: "{commonappdata}\FoggyBytes\StreamLight\update-status"
+
+[UninstallRun]
+; 8.6.0: the update task (RegisterUpdater in [Code], updater/task.cpp). Same name as k_TaskName.
+Filename: "schtasks.exe"; Parameters: "/Delete /TN ""StreamLight Update"" /F"; \
+    Flags: runhidden waituntilterminated; RunOnceId: "DeleteUpdateTask"
+; 8.2.0: the sign-in task (Settings → Interface → Start at sign-in, app/backend/signinlaunch.cpp).
+; Left behind, it would try to start an exe that is gone at every sign-in, forever. Same name
+; as k_TaskName; harmless when the switch was never turned on.
+Filename: "schtasks.exe"; Parameters: "/Delete /TN ""StreamLight Startup"" /F"; \
+    Flags: runhidden waituntilterminated; RunOnceId: "DeleteSignInTask"
 
 [Code]
 // ── Stop Windows from maximising the wizard ──────────────────────────────────
@@ -273,15 +359,16 @@ begin
     // NB: this label has no WordWrap, so every bullet must stay on one line —
     // keep them at or under ~76 characters or they get clipped on the right.
     '•  Link-speed matching — the host follows this device, no bufferbloat' + #13#10 +
-    '•  Seamless launch — optionally wait for the game to appear' + #13#10 +
+    '•  Seamless launch — waits for the game, flags it if Quit leaves it open' + #13#10 +
     '•  Wake the host and sign in with its PIN, from the sofa, on the pad' + #13#10 +
     '•  Live host metrics overlay (GPU, encoder, VRAM, temperature, CPU, network)' + #13#10 +
     '•  NVIDIA Sentinel — protects your driver profile from NVIDIA App resets' + #13#10 +
-    '•  Auto HDR toggle + spatial audio (Dolby Atmos / Windows Sonic)' + #13#10 +
+    '•  The host from the sofa — dashboard, sessions, library, apps, Sentinel' + #13#10 +
     '•  Game library sync with store badges (Steam, Epic, GOG, Xbox, …)' + #13#10 +
     '•  Session quality grading and charts, bitrate against your set target' + #13#10 +
     '•  Shared clipboard while you stream — encrypted, passwords cleared' + #13#10 +
     '•  Remote host sleep, restart, power-off and Windows Update' + #13#10 +
+    '•  Hue Sync keeps the lights on this device when the host wakes' + #13#10 +
     '•  Tailscale presence for remote streaming over the internet';
 
   StreamTweakOutroLabel := TNewStaticText.Create(StreamTweakPage);
@@ -312,4 +399,314 @@ begin
   StreamTweakLinkLabel.Font.Style := [fsUnderline];
   StreamTweakLinkLabel.OnClick := @StreamTweakLinkClick;
   StreamTweakLinkLabel.AutoSize := True;
+end;
+
+// ── Microsoft Visual C++ Runtime ─────────────────────────────────────────────
+// Why and which version: VCRedist at the top. Installed only when the machine's runtime is
+// older than the one bundled, and before any file is copied: the first thing [Run] does is
+// start StreamLight.exe (--register-xbox-tile), which needs it. Never uninstalled — it is
+// shared by every program on the machine.
+const
+  VCRedistKey = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
+  ERROR_SUCCESS_REBOOT_REQUIRED = 3010;
+  ERROR_PRODUCT_VERSION = 1638;   // a newer runtime is already installed: fine
+
+var
+  VCRedistRestart: Boolean;
+
+// The version VC_redist's own setup records. The x64 runtime registers itself in both
+// registry views; the native one is read first.
+function InstalledVCRedist(RootKey: Integer; var Version: Int64): Boolean;
+var
+  Installed, Major, Minor, Bld, Rbld: Cardinal;
+begin
+  Result := RegQueryDWordValue(RootKey, VCRedistKey, 'Installed', Installed) and (Installed = 1) and
+            RegQueryDWordValue(RootKey, VCRedistKey, 'Major', Major) and
+            RegQueryDWordValue(RootKey, VCRedistKey, 'Minor', Minor) and
+            RegQueryDWordValue(RootKey, VCRedistKey, 'Bld', Bld);
+  if Result then begin
+    if not RegQueryDWordValue(RootKey, VCRedistKey, 'Rbld', Rbld) then
+      Rbld := 0;
+    Version := PackVersionComponents(Word(Major), Word(Minor), Word(Bld), Word(Rbld));
+  end;
+end;
+
+function VCRedistNeeded: Boolean;
+var
+  Bundled, Present: Int64;
+begin
+  // Unreadable bundled version or no runtime recorded: run it. At worst VC_redist answers
+  // 1638 and changes nothing.
+  Result := True;
+  if not StrToVersion('{#VCRedistVersion}', Bundled) then
+    Exit;
+  if InstalledVCRedist(HKLM64, Present) or InstalledVCRedist(HKLM32, Present) then begin
+    Log('VC++ runtime: found ' + VersionToStr(Present) + ', bundled {#VCRedistVersion}');
+    Result := ComparePackedVersion(Present, Bundled) < 0;
+  end else
+    Log('VC++ runtime: none recorded, bundled {#VCRedistVersion}');
+end;
+
+procedure InstallVCRedist;
+var
+  Started: Boolean;
+  ResultCode: Integer;
+begin
+  if not VCRedistNeeded then
+    Exit;
+
+  Started := False;
+  WizardForm.StatusLabel.Caption := 'Installing Microsoft Visual C++ Runtime...';
+  WizardForm.ProgressGauge.Style := npbstMarquee;
+  try
+    ExtractTemporaryFile('vc_redist.x64.exe');
+    Started := Exec(ExpandConstant('{tmp}\vc_redist.x64.exe'), '/install /quiet /norestart', '',
+                    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  finally
+    WizardForm.ProgressGauge.Style := npbstNormal;
+  end;
+
+  if not Started then
+    Log('VC++ runtime: VC_redist could not be started, error ' + IntToStr(ResultCode))
+  else
+    Log('VC++ runtime: VC_redist exit code ' + IntToStr(ResultCode));
+
+  if Started and ((ResultCode = 0) or (ResultCode = ERROR_PRODUCT_VERSION)) then
+    Exit;
+  if Started and (ResultCode = ERROR_SUCCESS_REBOOT_REQUIRED) then begin
+    // A runtime DLL was in use and is replaced at the next boot: until then a new StreamLight
+    // would still load the old one, so the last page asks for the restart (Setup then hides
+    // the Launch box by itself).
+    VCRedistRestart := True;
+    Exit;
+  end;
+
+  // Not fatal for the setup, but StreamLight may not start: say so instead of leaving a
+  // program that closes on launch with nothing to explain it.
+  SuppressibleMsgBox('The Microsoft Visual C++ Runtime could not be installed (code ' +
+    IntToStr(ResultCode) + ').' + #13#10#13#10 +
+    'StreamLight needs it to start. Install the latest Microsoft Visual C++ ' +
+    'Redistributable (x64), then open StreamLight again.', mbError, MB_OK, IDOK);
+end;
+
+// ── The TV service (8.4.0) ───────────────────────────────────────────────────
+// StreamLightService.exe keeps an LG TV in step with this PC, from boot on (StreamLight/service/).
+// It runs as LOCAL SERVICE, not LocalSystem: talking to a TV on the LAN needs nothing more.
+// Stopped before the files are replaced (it holds its exe and Qt6Core.dll open), registered or
+// re-pointed after, removed at uninstall. With no TV paired it stops by itself after ten minutes,
+// and StreamLight starts it again when Settings → TV needs it — which the signed-in user may do
+// because of the service's own permissions below (RP = start, for INTERACTIVE).
+const
+  TvServiceName = 'StreamLight';
+  // Windows' default service permissions, plus RP (start) for the signed-in user.
+  TvServiceSddl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)' +
+                  '(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)';
+  ERROR_SERVICE_DOES_NOT_EXIST = 1060;
+
+function RunHidden(const Exe, Params: String): Integer;
+begin
+  if not Exec(Exe, Params, '', SW_HIDE, ewWaitUntilTerminated, Result) then
+    Result := -1;
+  Log('TV service: ' + ExtractFileName(Exe) + ' ' + Params + ' -> ' + IntToStr(Result));
+end;
+
+// net stop waits until the service has stopped (sc stop would only ask).
+procedure StopTvService;
+begin
+  RunHidden(ExpandConstant('{sys}\net.exe'), 'stop ' + TvServiceName);
+end;
+
+procedure RegisterTvService;
+var
+  Exe, DataDir, LogDir, Common, AppDir, Icacls: String;
+begin
+  Exe := ExpandConstant('{app}\StreamLightService.exe');
+  Icacls := ExpandConstant('{sys}\icacls.exe');
+
+  // ⚠️ 8.5.0 (security review): the service runs StreamLightService.exe and Qt6Core.dll from
+  // {app}, as LOCAL SERVICE, from boot. Under Program Files only administrators can change them;
+  // a folder chosen elsewhere (D:\…) inherits write access for every signed-in user from its
+  // drive, and whoever replaced a DLL there would run as the service. Such a folder gets
+  // Program Files' rights: SYSTEM and administrators full, users and app packages read.
+  AppDir := ExpandConstant('{app}');
+  if Pos(Lowercase(ExpandConstant('{commonpf}')) + '\', Lowercase(AppDir) + '\') <> 1 then begin
+    RunHidden(Icacls, '"' + AppDir + '" /setowner *S-1-5-32-544 /T /C /Q');
+    RunHidden(Icacls, '"' + AppDir + '" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F' +
+                      ' *S-1-5-32-545:(OI)(CI)RX *S-1-15-2-1:(OI)(CI)RX /C /Q');
+    RunHidden(Icacls, '"' + AppDir + '\*" /reset /T /C /Q');
+  end;
+  Common := 'binPath= "\"' + Exe + '\"" obj= "NT AUTHORITY\LocalService" start= auto';
+  if RunHidden(ExpandConstant('{sys}\sc.exe'), 'query ' + TvServiceName) = ERROR_SERVICE_DOES_NOT_EXIST then
+    RunHidden(ExpandConstant('{sys}\sc.exe'), 'create ' + TvServiceName + ' ' + Common + ' DisplayName= "StreamLight"')
+  else
+    RunHidden(ExpandConstant('{sys}\sc.exe'), 'config ' + TvServiceName + ' ' + Common);
+  RunHidden(ExpandConstant('{sys}\sc.exe'), 'description ' + TvServiceName + ' "Turns an LG webOS TV on and off with this PC."');
+  RunHidden(ExpandConstant('{sys}\sc.exe'), 'failure ' + TvServiceName + ' reset= 86400 actions= restart/5000/restart/5000//0');
+  RunHidden(ExpandConstant('{sys}\sc.exe'), 'sdset ' + TvServiceName + ' "' + TvServiceSddl + '"');
+
+  // Its pairing (tv.json). LOCAL SERVICE (S-1-5-19) must write there.
+  // ⚠️ 8.5.0 (security review): its own rights, not ProgramData's. Inherited, every user could
+  // read tv.json — the TV's client key — and create files in the folder; and a folder made
+  // beforehand by a user stayed theirs. Now owned by administrators, with SYSTEM and
+  // administrators full and LOCAL SERVICE modify, and nothing for anyone else: StreamLight
+  // itself never reads here, it asks the service through its pipe.
+  DataDir := ExpandConstant('{commonappdata}\FoggyBytes\StreamLight\service');
+  ForceDirectories(DataDir);
+  RunHidden(Icacls, '"' + DataDir + '" /setowner *S-1-5-32-544 /T /C /Q');
+  RunHidden(Icacls, '"' + DataDir + '" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F' +
+                    ' *S-1-5-19:(OI)(CI)M /C /Q');
+  RunHidden(Icacls, '"' + DataDir + '\*" /reset /T /C /Q');
+
+  // ⚠️ 8.5.0: its log, in a folder of its own (service/tvstore.cpp, TvStore::logFolder). In the
+  // closed folder above, users could not open it any more; here they may read but not write, so
+  // the app copies it next to its own logs (LogsAndCache::copyServiceLog). It never holds the
+  // key or the certificate. Owned by administrators for the same reason as the folder above.
+  // The log the 8.4.0 service left beside tv.json goes.
+  LogDir := ExpandConstant('{commonappdata}\FoggyBytes\StreamLight\logs');
+  ForceDirectories(LogDir);
+  RunHidden(Icacls, '"' + LogDir + '" /setowner *S-1-5-32-544 /T /C /Q');
+  RunHidden(Icacls, '"' + LogDir + '" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F' +
+                    ' *S-1-5-19:(OI)(CI)M *S-1-5-32-545:(OI)(CI)RX /C /Q');
+  RunHidden(Icacls, '"' + LogDir + '\*" /reset /T /C /Q');
+  DeleteFile(DataDir + '\service.log');
+  DeleteFile(DataDir + '\service.log.1');
+
+  // Started now so a TV already paired is followed from this moment, not from the next boot.
+  RunHidden(ExpandConstant('{sys}\sc.exe'), 'start ' + TvServiceName);
+end;
+
+// ── The updater (8.6.0) ──────────────────────────────────────────────────────
+// StreamLightUpdater.exe installs an update started from Settings → About without the Windows
+// prompt, which a controller cannot answer (updater/, and SECURITY.md for what it checks). Here:
+// its folders with their rights, and its task, "StreamLight Update", for the account running
+// this setup. When the updater itself runs this setup it passes /APPUPDATE, and the progress
+// goes to its screen instead of a wizard.
+const
+  UpdaterScreenClass = 'StreamLightUpdaterScreen';   // updater/common.cpp, k_ScreenClass
+  WM_APP_SETUPPROGRESS = $8001;                      // WM_APP + 1, k_MsgSetupProgress
+  // FILE_ATTRIBUTE_REPARSE_POINT ($400) is Inno Setup's own.
+  NO_FILE_ATTRIBUTES = $FFFFFFFF;                    // INVALID_FILE_ATTRIBUTES
+
+function GetFileAttributes(lpFileName: String): Cardinal;
+  external 'GetFileAttributesW@kernel32.dll stdcall';
+
+var
+  AppUpdateRunChecked, AppUpdateRunValue: Boolean;
+
+function IsAppUpdate: Boolean;
+var
+  I: Integer;
+begin
+  if not AppUpdateRunChecked then begin
+    AppUpdateRunChecked := True;
+    AppUpdateRunValue := False;
+    for I := 1 to ParamCount do
+      if CompareText(ParamStr(I), '/APPUPDATE') = 0 then
+        AppUpdateRunValue := True;
+  end;
+  Result := AppUpdateRunValue;
+end;
+
+// The updater's screen draws the bar; nothing is drawn here (/VERYSILENT).
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+var
+  Wnd: HWND;
+begin
+  if not IsAppUpdate then
+    Exit;
+  Wnd := FindWindowByClassName(UpdaterScreenClass);
+  if Wnd <> 0 then
+    PostMessage(Wnd, WM_APP_SETUPPROGRESS, CurProgress, MaxProgress);
+end;
+
+// A junction or symbolic link where a folder of ours should be is removed, not followed: the
+// updater writes in these folders with administrator rights. (RemoveDir on a junction removes
+// the junction only.)
+procedure DropReparsePoint(const Dir: String);
+var
+  Attrs: Cardinal;
+begin
+  Attrs := GetFileAttributes(Dir);
+  if (Attrs <> NO_FILE_ATTRIBUTES) and ((Attrs and FILE_ATTRIBUTE_REPARSE_POINT) <> 0) then begin
+    Log('Updater: removing the reparse point at ' + Dir);
+    RemoveDir(Dir);
+  end;
+end;
+
+procedure RegisterUpdater;
+var
+  Icacls, Parent, Base, WorkDir, StatusDir, User: String;
+  ResultCode: Integer;
+begin
+  Icacls := ExpandConstant('{sys}\icacls.exe');
+  Parent := ExpandConstant('{commonappdata}\FoggyBytes');
+  Base := Parent + '\StreamLight';
+  WorkDir := Base + '\update';
+  StatusDir := Base + '\update-status';
+
+  // ⚠️ The two parents belong to the administrators. Anyone may create folders in ProgramData,
+  // and whoever owns a folder can give themselves the right to rename what is inside it — the
+  // updater's folders included. Their rights go back to what ProgramData passes down.
+  ForceDirectories(Base);
+  RunHidden(Icacls, '"' + Parent + '" /setowner *S-1-5-32-544 /C /Q');
+  RunHidden(Icacls, '"' + Parent + '" /reset /C /Q');
+  RunHidden(Icacls, '"' + Base + '" /setowner *S-1-5-32-544 /C /Q');
+  RunHidden(Icacls, '"' + Base + '" /reset /C /Q');
+
+  // The work folder: SYSTEM and administrators only. The updater copies itself and the
+  // installer here, and gives Setup a TEMP here (updater/common.cpp, foldersAreSafe).
+  DropReparsePoint(WorkDir);
+  ForceDirectories(WorkDir);
+  RunHidden(Icacls, '"' + WorkDir + '" /setowner *S-1-5-32-544 /T /C /Q');
+  RunHidden(Icacls, '"' + WorkDir + '" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /C /Q');
+  RunHidden(Icacls, '"' + WorkDir + '\*" /reset /T /C /Q');
+
+  // Its status (status.json, updater.log, setup.log): users may read it — StreamLight follows
+  // the update there — and nobody but SYSTEM and administrators may write.
+  DropReparsePoint(StatusDir);
+  ForceDirectories(StatusDir);
+  RunHidden(Icacls, '"' + StatusDir + '" /setowner *S-1-5-32-544 /T /C /Q');
+  RunHidden(Icacls, '"' + StatusDir + '" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F' +
+                    ' *S-1-5-32-545:(OI)(CI)RX /C /Q');
+  RunHidden(Icacls, '"' + StatusDir + '\*" /reset /T /C /Q');
+
+  // The task, for the account running this setup: the signed-in user after a consent prompt —
+  // and the same account when the updater runs it. Its principal, rights and action are set by
+  // the updater itself (updater/task.cpp); this setup only names the account.
+  User := GetEnv('USERDOMAIN') + '\' + GetUserNameString;
+  if not Exec(ExpandConstant('{app}\StreamLightUpdater.exe'), '--register "' + User + '"', '',
+              SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    ResultCode := -1;
+  Log('Updater: task for ' + User + ' -> ' + IntToStr(ResultCode));
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  // An update: the running service holds files about to be replaced.
+  StopTvService;
+  Result := '';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+    InstallVCRedist;
+  if CurStep = ssPostInstall then begin
+    RegisterTvService;
+    RegisterUpdater;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  // Before the files go: a running service would keep its exe.
+  if CurUninstallStep = usUninstall then begin
+    StopTvService;
+    RunHidden(ExpandConstant('{sys}\sc.exe'), 'delete ' + TvServiceName);
+  end;
+end;
+
+function NeedRestart: Boolean;
+begin
+  Result := VCRedistRestart;
 end;

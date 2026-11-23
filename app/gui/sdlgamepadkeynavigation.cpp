@@ -10,7 +10,16 @@
 #include <QDateTime>
 #include <QStandardPaths>
 
+#ifdef Q_OS_WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>   // 8.7.0: GetModuleHandleW / GetProcAddress for SDL3's power calls
+#endif
+
 #include "settings/mappingmanager.h"
+#include "backend/uisound.h"
+#include "backend/xboxpadpower.h"
 
 // Append a line to a debug log file next to the executable.
 // Lets us diagnose gamepad-nav issues without redirecting stderr
@@ -20,7 +29,11 @@ static void slDbg(const QString& line)
     static QFile* f = nullptr;
     if (!f) {
         f = new QFile(QCoreApplication::applicationDirPath() + "/streamlight_pad.log");
-        f->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+        // Next to the executable is not writable in an install under Program Files: the
+        // log is then simply off, which the isOpen() below already handles.
+        if (!f->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            return;
+        }
     }
     if (f->isOpen()) {
         QTextStream(f) << QDateTime::currentDateTime().toString("hh:mm:ss.zzz")
@@ -30,6 +43,77 @@ static void slDbg(const QString& line)
 }
 
 #define AXIS_NAVIGATION_REPEAT_DELAY 150
+
+// How far apart a pad press and Steam Input's keyboard copy of it can land and still be one
+// press (#24). The pad is polled every 50 ms, so the copy usually comes first by up to that.
+#define INPUT_ECHO_WINDOW_MS 150
+
+// Matched pairs before the Desktop Layout notice (6.5.1). In the log of #24 the third came
+// within 3 s of the first press; one alone could be a key pressed with the pad by chance.
+#define DESKTOP_LAYOUT_ECHOES 3
+
+// Valve. The Steam Controller, the Steam Deck — and Steam's virtual pad, which is an Xbox 360
+// to everyone and is kept on the Xbox glyphs by its SDL type.
+#define USB_VENDOR_VALVE 0x28de
+// Microsoft: its pads' charge comes from Windows, not from SDL (8.7.0, backend/xboxpadpower.h).
+#define USB_VENDOR_MICROSOFT 0x045e
+// The Steam Controller seen in #24, whose Desktop Layout has "Change Action Set (Gamepad)" on
+// a long press of Menu. Other Valve pads are not known to, so the notice names it only here.
+#define USB_PRODUCT_STEAM_CONTROLLER 0x1304
+
+// 8.7.0: the pads' charge comes from SDL3. The interface talks to SDL through sdl2-compat, whose
+// SDL2 call keeps only four levels and says "unknown" while a pad charges; sdl2-compat hands SDL3
+// the same SDL_Joystick* it was given (sdl2_compat.c, SDL_JoystickCurrentPowerLevel), so SDL3's
+// own calls are looked up in SDL3.dll and fed that pointer. Its enums are written out by value:
+// only SDL2's headers are in scope here.
+namespace {
+enum { SDL3_POWER_UNKNOWN = 0, SDL3_POWER_ON_BATTERY = 1, SDL3_POWER_NO_BATTERY = 2,
+       SDL3_POWER_CHARGING = 3, SDL3_POWER_CHARGED = 4 };
+enum { SDL3_CONNECTION_WIRED = 1, SDL3_CONNECTION_WIRELESS = 2 };
+typedef int (SDLCALL *Sdl3PowerInfoFn)(SDL_Joystick*, int*);
+typedef int (SDLCALL *Sdl3ConnectionFn)(SDL_Joystick*);
+
+struct Sdl3Power {
+    Sdl3PowerInfoFn powerInfo = nullptr;
+    Sdl3ConnectionFn connection = nullptr;
+};
+
+const Sdl3Power& sdl3Power()
+{
+    static const Sdl3Power fns = [] {
+        Sdl3Power f;
+#ifdef Q_OS_WIN32
+        if (HMODULE sdl3 = GetModuleHandleW(L"SDL3.dll")) {
+            f.powerInfo = reinterpret_cast<Sdl3PowerInfoFn>(GetProcAddress(sdl3, "SDL_GetJoystickPowerInfo"));
+            f.connection = reinterpret_cast<Sdl3ConnectionFn>(GetProcAddress(sdl3, "SDL_GetJoystickConnectionState"));
+        }
+#endif
+        return f;
+    }();
+    return fns;
+}
+
+// 4 Full · 3 Medium · 2 Low · 1 Critical. The adapter's Medium arrives as 70 and must land on 3.
+int levelOf(int percent)
+{
+    return percent >= 85 ? 4 : percent >= 50 ? 3 : percent >= 20 ? 2 : 1;
+}
+}
+
+// #24 diagnostics: every controller the interface opens, in the main StreamLight-*.log. A
+// second device here (Steam's virtual pad is VID 28de PID 11ff) is the other way a press can
+// arrive twice, and the echo matching below does not cover it.
+static void logPadDevice(const char* what, SDL_GameController* gc)
+{
+    SDL_Joystick* js = SDL_GameControllerGetJoystick(gc);
+    const char* name = SDL_GameControllerName(gc);
+    const char* path = SDL_GameControllerPath(gc);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[padnav] %s: '%s' instance=%d VID=%04x PID=%04x type=%d path=%s",
+                what, name ? name : "(null)", (int)SDL_JoystickInstanceID(js),
+                SDL_GameControllerGetVendor(gc), SDL_GameControllerGetProduct(gc),
+                (int)SDL_GameControllerGetType(gc), path ? path : "(null)");
+}
 
 SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
     : m_Prefs(prefs),
@@ -42,10 +126,23 @@ SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
       m_RightTriggerDown(false),
       m_ControllerType(QStringLiteral("none")),
       m_InputMode(QStringLiteral("pointer")),
-      m_HasLastMousePos(false)
+      m_HasLastMousePos(false),
+      m_EchoCount(0),
+      m_DesktopLayoutReported(false)
 {
     m_PollingTimer = new QTimer(this);
     connect(m_PollingTimer, &QTimer::timeout, this, &SdlGamepadKeyNavigation::onPollingTimerFired);
+
+    m_BatteryTimer = new QTimer(this);
+    m_BatteryTimer->setInterval(30000);
+    connect(m_BatteryTimer, &QTimer::timeout, this, &SdlGamepadKeyNavigation::refreshPadBatteries);
+
+    m_NavClock.start();
+    for (int i = 0; i < NB_COUNT; i++) {
+        m_PadNavAt[i] = -1;
+        m_KeyNavAt[i] = -1;
+        m_PadNavDropped[i] = false;
+    }
 
     // Issue #24: Button prompts = Controller also pins the navigation to the pad, so a Steam
     // Input trackpad can point and click without switching the interface to mouse use. The
@@ -86,9 +183,122 @@ QString SdlGamepadKeyNavigation::controllerType() const
         return QStringLiteral("ps");
     case StreamingPreferences::GS_NINTENDO:
         return QStringLiteral("switch");
+    case StreamingPreferences::GS_STEAM:
+        return QStringLiteral("steam");
     case StreamingPreferences::GS_AUTO:
     default:
         return m_ControllerType;
+    }
+}
+
+void SdlGamepadKeyNavigation::refreshPadBatteries()
+{
+    QVariantList list;
+    QStringList summary;
+    auto add = [&](const QString& brand, int percent, bool charging, bool full) {
+        QVariantMap pad;
+        pad[QStringLiteral("brand")] = brand;
+        pad[QStringLiteral("level")] = full ? 4 : percent >= 0 ? levelOf(percent) : 0;
+        pad[QStringLiteral("charging")] = charging;
+        pad[QStringLiteral("critical")] = !charging && percent >= 0 && percent <= 10;
+        list.append(pad);
+        summary.append(QStringLiteral("%1 %2%3").arg(brand, percent >= 0 ? QString::number(percent) + QStringLiteral("%") : QStringLiteral("?"),
+                                                     charging ? QStringLiteral(" charging") : full ? QStringLiteral(" full") : QString()));
+    };
+
+    // Nothing while the interface has no pads open (a stream, or before enable()).
+    if (m_Enabled) {
+        // Microsoft's pads from Windows (backend/xboxpadpower.h says why SDL cannot): when that
+        // works, SDL's own entries for them are left out, so no pad shows twice.
+        QList<XboxPadPower::Reading> microsoft;
+        const bool fromWindows = XboxPadPower::read(&microsoft);
+
+        const Sdl3Power& sdl3 = sdl3Power();
+        int microsoftOpen = 0;
+        for (SDL_GameController* gc : std::as_const(m_Gamepads)) {
+            SDL_Joystick* js = SDL_GameControllerGetJoystick(gc);
+            if (SDL_GameControllerGetVendor(gc) == USB_VENDOR_MICROSOFT) {
+                microsoftOpen++;
+                if (fromWindows) {
+                    continue;
+                }
+            }
+            if (sdl3.powerInfo != nullptr && sdl3.connection != nullptr) {
+                const int connection = sdl3.connection(js);
+                int percent = -1;
+                const int state = sdl3.powerInfo(js, &percent);
+                // A pad on a cable is left out: the corner is for the ones that can run flat.
+                if (connection == SDL3_CONNECTION_WIRED) {
+                    continue;
+                }
+                // Some backends never say how a pad is connected (XInput, for one). Then only a pad
+                // reported on its own battery counts: XInput reports a wired pad as charging.
+                if (connection != SDL3_CONNECTION_WIRELESS && state != SDL3_POWER_ON_BATTERY) {
+                    continue;
+                }
+                if (state != SDL3_POWER_ON_BATTERY && state != SDL3_POWER_CHARGING && state != SDL3_POWER_CHARGED) {
+                    continue;   // nothing known about its battery: better absent than a made-up level
+                }
+                add(familyOf(gc), percent, state == SDL3_POWER_CHARGING, state == SDL3_POWER_CHARGED);
+            }
+            else {
+                // SDL3's calls not found: SDL2's four levels, and no word on charging.
+                switch (SDL_JoystickCurrentPowerLevel(js)) {
+                case SDL_JOYSTICK_POWER_EMPTY:  add(familyOf(gc), 5, false, false);   break;
+                case SDL_JOYSTICK_POWER_LOW:    add(familyOf(gc), 20, false, false);  break;
+                case SDL_JOYSTICK_POWER_MEDIUM: add(familyOf(gc), 70, false, false);  break;
+                case SDL_JOYSTICK_POWER_FULL:   add(familyOf(gc), 100, false, false); break;
+                default: break;   // wired, or unknown
+                }
+            }
+        }
+
+        if (fromWindows) {
+            for (const XboxPadPower::Reading& r : std::as_const(microsoft)) {
+                add(QStringLiteral("xbox"), r.percent, r.charging, r.full);
+            }
+            // Windows.Gaming.Input fills its list a moment after the process first asks: a pad SDL
+            // has open and Windows does not list yet is read again shortly (a few times at most).
+            if (microsoft.isEmpty() && microsoftOpen > 0 && m_PadBatteryRetries < 3) {
+                m_PadBatteryRetries++;
+                QTimer::singleShot(2000, this, &SdlGamepadKeyNavigation::refreshPadBatteries);
+            }
+            else if (!microsoft.isEmpty()) {
+                m_PadBatteryRetries = 0;
+            }
+        }
+    }
+
+    if (list != m_PadBatteries) {
+        m_PadBatteries = list;
+        // One line per change, for reports: what the corner shows and where it came from.
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[padbattery] %s",
+                    summary.isEmpty() ? "none" : qPrintable(summary.join(QStringLiteral(", "))));
+        emit padBatteriesChanged();
+    }
+}
+
+QString SdlGamepadKeyNavigation::familyOf(SDL_GameController* gc)
+{
+    switch (SDL_GameControllerGetType(gc)) {
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+    case SDL_CONTROLLER_TYPE_PS5:
+        return QStringLiteral("ps");
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE:
+        return QStringLiteral("xbox");
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+        return QStringLiteral("switch");
+    default:
+        // SDL has no type for Valve's own pads: the Steam Controller of #24 reports 0
+        // (unknown). Read by vendor, after the Xbox cases, so Steam's virtual pad — Valve
+        // too, but typed as an Xbox 360 — keeps the Xbox glyphs.
+        return SDL_GameControllerGetVendor(gc) == USB_VENDOR_VALVE
+                ? QStringLiteral("steam") : QStringLiteral("generic");
     }
 }
 
@@ -99,26 +309,7 @@ void SdlGamepadKeyNavigation::updateControllerType()
         SDL_GameController* gc = m_Gamepads.first();
         SDL_GameControllerType t = SDL_GameControllerGetType(gc);
         const char* name = SDL_GameControllerName(gc);
-        switch (t) {
-        case SDL_CONTROLLER_TYPE_PS3:
-        case SDL_CONTROLLER_TYPE_PS4:
-        case SDL_CONTROLLER_TYPE_PS5:
-            newType = QStringLiteral("ps");
-            break;
-        case SDL_CONTROLLER_TYPE_XBOX360:
-        case SDL_CONTROLLER_TYPE_XBOXONE:
-            newType = QStringLiteral("xbox");
-            break;
-        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
-        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
-        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
-        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
-            newType = QStringLiteral("switch");
-            break;
-        default:
-            newType = QStringLiteral("generic");
-            break;
-        }
+        newType = familyOf(gc);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Gamepad detected: %s (SDL type=%d, family=%s)",
                     name ? name : "(null)", (int)t, qPrintable(newType));
@@ -127,6 +318,9 @@ void SdlGamepadKeyNavigation::updateControllerType()
         m_ControllerType = newType;
         emit controllerTypeChanged();
     }
+
+    // Every place that changes the list of pads comes through here.
+    refreshPadBatteries();
 }
 
 SdlGamepadKeyNavigation::~SdlGamepadKeyNavigation()
@@ -181,11 +375,155 @@ bool SdlGamepadKeyNavigation::eventFilter(QObject* watched, QEvent* event)
         break;
     case QEvent::KeyPress:
         setInputMode(QStringLiteral("key"));
+        // Only keys the window system delivered: the pad's own keys are sent by sendKey()
+        // and are never spontaneous.
+        if (event->spontaneous() && keyEventIsEcho(static_cast<QKeyEvent*>(event))) {
+            return true;
+        }
+        break;
+    case QEvent::ShortcutOverride:
+    case QEvent::KeyRelease:
+        if (event->spontaneous() && keyEventIsEcho(static_cast<QKeyEvent*>(event))) {
+            return true;
+        }
         break;
     default:
         break;
     }
     return QObject::eventFilter(watched, event);
+}
+
+int SdlGamepadKeyNavigation::navButtonForKey(int qtKey)
+{
+    switch (qtKey) {
+    case Qt::Key_Up:     return NB_UP;
+    case Qt::Key_Down:   return NB_DOWN;
+    case Qt::Key_Left:   return NB_LEFT;
+    case Qt::Key_Right:  return NB_RIGHT;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:  return NB_ACCEPT;
+    case Qt::Key_Escape: return NB_BACK;
+    default:             return NB_COUNT;
+    }
+}
+
+int SdlGamepadKeyNavigation::navButtonForPad(int sdlButton)
+{
+    // After the face-button swap: what the press will act as, not where it sits.
+    switch (sdlButton) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:    return NB_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return NB_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return NB_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return NB_RIGHT;
+    case SDL_CONTROLLER_BUTTON_A:          return NB_ACCEPT;
+    case SDL_CONTROLLER_BUTTON_B:          return NB_BACK;
+    default:                               return NB_COUNT;
+    }
+}
+
+bool SdlGamepadKeyNavigation::padPressIsEcho(int nav)
+{
+    const qint64 now = m_NavClock.elapsed();
+    if (m_KeyNavAt[nav] >= 0 && now - m_KeyNavAt[nav] <= INPUT_ECHO_WINDOW_MS) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[padnav] pad press %d dropped: the same key came from the keyboard %d ms earlier",
+                    nav, (int)(now - m_KeyNavAt[nav]));
+        m_KeyNavAt[nav] = -1;
+        noteInputEcho();
+        return true;
+    }
+    m_PadNavAt[nav] = now;
+    return false;
+}
+
+bool SdlGamepadKeyNavigation::keyEventIsEcho(QKeyEvent* ke)
+{
+    const int key = ke->key();
+    auto it = m_KeyDecisions.find(key);
+
+    if (ke->type() == QEvent::KeyRelease) {
+        if (it == m_KeyDecisions.end()) {
+            return false;
+        }
+        const bool echo = it->echo;
+        if (!ke->isAutoRepeat()) {
+            m_KeyDecisions.erase(it);
+        }
+        return echo;
+    }
+
+    // ShortcutOverride or KeyPress. Auto-repeat, and the KeyPress that follows its own
+    // ShortcutOverride, belong to a press already decided.
+    const bool samePress = it != m_KeyDecisions.end()
+            && (ke->isAutoRepeat() || it->timestamp == ke->timestamp());
+    bool echo;
+    if (samePress) {
+        echo = it->echo;
+    }
+    else if (ke->isAutoRepeat()) {
+        return false;
+    }
+    else {
+        const int nav = navButtonForKey(key);
+        if (nav == NB_COUNT || (ke->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier |
+                                                   Qt::AltModifier | Qt::MetaModifier))) {
+            if (it != m_KeyDecisions.end()) {
+                m_KeyDecisions.erase(it);
+            }
+            return false;
+        }
+
+        const qint64 now = m_NavClock.elapsed();
+        echo = m_PadNavAt[nav] >= 0 && now - m_PadNavAt[nav] <= INPUT_ECHO_WINDOW_MS;
+        if (echo) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[padnav] keyboard key 0x%x dropped: the same press came from the pad %d ms earlier",
+                        key, (int)(now - m_PadNavAt[nav]));
+            m_PadNavAt[nav] = -1;
+            noteInputEcho();
+        }
+        else {
+            m_KeyNavAt[nav] = now;
+        }
+        // A new press overwrites whatever a lost release left behind.
+        m_KeyDecisions.insert(key, KeyDecision { ke->timestamp(), echo });
+    }
+
+    if (echo) {
+        // It was the pad: undo the keyboard reading InputHints may have taken from it.
+        InputHints::get()->notePadInput();
+        if (ke->type() == QEvent::ShortcutOverride) {
+            // Accepted override = no shortcut fires (a popup's Escape would close it), and the
+            // KeyPress that follows comes back here to be swallowed.
+            ke->accept();
+        }
+    }
+    return echo;
+}
+
+void SdlGamepadKeyNavigation::noteInputEcho()
+{
+    if (m_DesktopLayoutReported || ++m_EchoCount < DESKTOP_LAYOUT_ECHOES) {
+        return;
+    }
+    m_DesktopLayoutReported = true;
+    emit desktopLayoutEchoesChanged();
+    const bool menuHold = steamControllerConnected();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[padnav] %d echoes: Steam's Desktop Layout is sending the pad as keyboard too (notice shown%s)",
+                m_EchoCount, menuHold ? ", Steam Controller: hold Menu" : "");
+    emit steamDesktopLayoutDetected(menuHold);
+}
+
+bool SdlGamepadKeyNavigation::steamControllerConnected() const
+{
+    for (SDL_GameController* gc : m_Gamepads) {
+        if (SDL_GameControllerGetVendor(gc) == USB_VENDOR_VALVE &&
+                SDL_GameControllerGetProduct(gc) == USB_PRODUCT_STEAM_CONTROLLER) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void SdlGamepadKeyNavigation::enable()
@@ -228,8 +566,17 @@ void SdlGamepadKeyNavigation::enable()
             SDL_GameController* gc = SDL_GameControllerOpen(i);
             if (gc != nullptr) {
                 m_Gamepads.append(gc);
+                logPadDevice("opened", gc);
             }
         }
+    }
+
+    {
+        SDL_version linked;
+        SDL_GetVersion(&linked);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[padnav] enable(): %d controller(s), %d joystick(s), SDL %d.%d.%d",
+                    (int)m_Gamepads.size(), numJoysticks, linked.major, linked.minor, linked.patch);
     }
 
     updateControllerType();
@@ -239,6 +586,7 @@ void SdlGamepadKeyNavigation::enable()
     InputHints::get()->seedFromConnectedPads(!m_Gamepads.isEmpty());
 
     m_Enabled = true;
+    m_BatteryTimer->start();
 
     // Start the polling timer if the window is focused
     updateTimerState();
@@ -258,6 +606,8 @@ void SdlGamepadKeyNavigation::disable()
         SDL_GameControllerClose(m_Gamepads[0]);
         m_Gamepads.removeAt(0);
     }
+    m_BatteryTimer->stop();
+    refreshPadBatteries();   // nothing open: the corner empties
 
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
 }
@@ -334,29 +684,49 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
                 }
             }
 
+            // Steam Input's keyboard copy of this press may already have acted (#24). A
+            // dropped press drops its release too.
+            const int nav = navButtonForPad(event.cbutton.button);
+            if (nav != NB_COUNT) {
+                if (type == QEvent::Type::KeyPress) {
+                    m_PadNavDropped[nav] = padPressIsEcho(nav);
+                    if (m_PadNavDropped[nav]) {
+                        break;
+                    }
+                }
+                else if (m_PadNavDropped[nav]) {
+                    m_PadNavDropped[nav] = false;
+                    break;
+                }
+            }
+
+            // After the right stick scrolled the view away, the first D-pad step brings the
+            // focused element back into view and goes no further (7.0.0). Its release is let
+            // through: a release with no press is ignored by every control.
+            if (m_ScrolledAway && type == QEvent::Type::KeyPress
+                    && (event.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP
+                        || event.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN
+                        || event.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_LEFT
+                        || event.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) {
+                m_ScrolledAway = false;
+                emit refocusRequested();
+                break;
+            }
+
             switch (event.cbutton.button) {
             case SDL_CONTROLLER_BUTTON_DPAD_UP:
-                if (m_UiNavMode) {
-                    // Back-tab
-                    sendKey(type, Qt::Key_Tab, Qt::ShiftModifier);
-                }
-                else {
-                    sendKey(type, Qt::Key_Up);
-                }
-                break;
             case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-                if (m_UiNavMode) {
-                    sendKey(type, Qt::Key_Tab);
-                }
-                else {
-                    sendKey(type, Qt::Key_Down);
-                }
-                break;
             case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                sendKey(type, Qt::Key_Left);
-                break;
             case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                sendKey(type, Qt::Key_Right);
+                sendDpad(event.cbutton.button, type);
+                // Held, it repeats from the poll below; the last direction pressed wins.
+                if (type == QEvent::Type::KeyPress) {
+                    m_HeldDpad = event.cbutton.button;
+                    m_HeldDpadSince = m_LastDpadRepeat = SDL_GetTicks();
+                }
+                else if (m_HeldDpad == event.cbutton.button) {
+                    m_HeldDpad = -1;
+                }
                 break;
             case SDL_CONTROLLER_BUTTON_A:
                 if (m_UiNavMode) {
@@ -406,9 +776,14 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
                 // only the page's own handler does. Start still does NOT open Settings (see Y).
                 sendKey(type, Qt::Key_F18);
                 break;
+            case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+                // Left stick click switches the library between covers and the title list.
+                sendKey(type, Qt::Key_F20);
+                break;
             case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
                 // Right stick click (6.1.0): moves the selected entry between GAMES and APPS on
-                // the host page. Inert key, same reason as F13 and F18.
+                // the host page; on Home (7.0.0) it switches between Dark and Light. Inert key,
+                // same reason as F13 and F18.
                 sendKey(type, Qt::Key_F19);
                 break;
             default:
@@ -416,7 +791,11 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             }
             break;
         }
-        case SDL_CONTROLLERDEVICEADDED:
+        case SDL_JOYBATTERYUPDATED:
+            // 8.7.0: a pad's charge moved.
+            refreshPadBatteries();
+            break;
+        case SDL_CONTROLLERDEVICEADDED: {
             SDL_GameController* gc = SDL_GameControllerOpen(event.cdevice.which);
             if (gc != nullptr) {
                 // SDL_CONTROLLERDEVICEADDED can be reported multiple times for the same
@@ -425,6 +804,7 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
                 // before we've processed the add event.
                 if (!m_Gamepads.contains(gc)) {
                     m_Gamepads.append(gc);
+                    logPadDevice("added", gc);
                     updateControllerType();
                 }
                 else {
@@ -434,12 +814,51 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             }
             break;
         }
+        case SDL_CONTROLLERDEVICEREMOVED:
+            // 8.0.0: a pad that goes is let go. It used to stay in the list — the glyphs are read
+            // from the first pad, so after swapping an Xbox pad for a DualSense they stayed Xbox,
+            // and the Steam Controller check behind the Desktop Layout notice could see a pad
+            // that was no longer there. `which` is the joystick instance id here, not an index.
+            for (int i = 0; i < m_Gamepads.size(); i++) {
+                SDL_GameController* gc = m_Gamepads[i];
+                if (SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc)) == event.cdevice.which) {
+                    logPadDevice("removed", gc);
+                    SDL_GameControllerClose(gc);
+                    m_Gamepads.removeAt(i);
+                    updateControllerType();
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    // A held D-pad repeats like a held key (7.0.0): after 400 ms, ten steps a second, then
+    // one per poll after another second — a slider sweeps, a long list runs. The repeats go
+    // out as auto-repeat presses, which the echo filter and every control already treat as
+    // the same press continuing.
+    if (m_HeldDpad >= 0) {
+        const Uint32 now = SDL_GetTicks();
+        const Uint32 held = now - m_HeldDpadSince;
+        const Uint32 every = held > 1400 ? 45 : 95;
+        if (held >= 400 && now - m_LastDpadRepeat >= every) {
+            sendDpad(m_HeldDpad, QEvent::Type::KeyPress, true);
+            m_LastDpadRepeat = now;
+        }
     }
 
     // Handle analog sticks by polling
+    qreal scrollVelocity = 0;
+    qreal scrollVelocityX = 0;
+    // The triggers of every pad, the strongest pull of each (8.0.0) — see below the loop.
+    int leftTriggerMax = 0;
+    int rightTriggerMax = 0;
     for (auto gc : std::as_const(m_Gamepads)) {
-        short leftX = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
-        short leftY = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
+        // ⚠️ int, not short: a stick pushed all the way up or left reads −32768, and qAbs() of
+        // that as a short is −32768 again. The right stick pushed straight to the top read as
+        // resting, so the view would not scroll up until the push eased off (7.0.0).
+        const int leftX = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
+        const int leftY = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
 
         // The stick navigates as much as the D-pad does, so it is pad input as much as a
         // button is. Same threshold as the navigation below: resting drift must not count.
@@ -447,8 +866,52 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             InputHints::get()->notePadInput();
         }
 
+        // The one direction this poll would step, in the order the branches below test them.
+        const int stickNav = leftY < -30000 ? NB_UP
+                           : leftY > 30000  ? NB_DOWN
+                           : leftX < -30000 ? NB_LEFT
+                           : leftX > 30000  ? NB_RIGHT
+                           : NB_COUNT;
+
+        // The right stick scrolls the view under the focus (7.0.0). Speed grows with the
+        // square of the deflection past a dead zone wide enough for a worn stick: a nudge
+        // reads, a full push moves about 2500 px/s. Only vertical — no page here is wider
+        // than the window.
+        // ⚠️ Published as a SPEED, not as a step: this poll runs at 20 Hz, and moving the view
+        // here jumped it up to 125 px twenty times a second — visibly jerky, held or not.
+        // PadScroll.qml moves the view by this speed on every frame instead.
+        const int rightY = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
+        const int deadZone = 8000;
+        if (qAbs(rightY) > deadZone) {
+            InputHints::get()->notePadInput();
+            const qreal norm = qMin(1.0, (qAbs(rightY) - deadZone) / qreal(32767 - deadZone));
+            const qreal pxPerSecond = (rightY > 0 ? 1.0 : -1.0) * (250.0 + 2250.0 * norm * norm);
+            // Two pads pushed at once: the stronger push wins.
+            if (qAbs(pxPerSecond) > qAbs(scrollVelocity)) scrollVelocity = pxPerSecond;
+        }
+        // 8.0.0: and sideways, the same curve, for the views that scroll that way (#42). Read
+        // separately so a diagonal push is two speeds; a view uses the axis it scrolls on.
+        const int rightX = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX);
+        if (qAbs(rightX) > deadZone) {
+            InputHints::get()->notePadInput();
+            const qreal norm = qMin(1.0, (qAbs(rightX) - deadZone) / qreal(32767 - deadZone));
+            const qreal pxPerSecond = (rightX > 0 ? 1.0 : -1.0) * (250.0 + 2250.0 * norm * norm);
+            if (qAbs(pxPerSecond) > qAbs(scrollVelocityX)) scrollVelocityX = pxPerSecond;
+        }
+
         if (SDL_GetTicks() - m_LastAxisNavigationEventTime < AXIS_NAVIGATION_REPEAT_DELAY) {
             // Do nothing
+        }
+        // The first left-stick step after a scroll only re-focuses, as the D-pad does.
+        else if (stickNav != NB_COUNT && m_ScrolledAway) {
+            m_ScrolledAway = false;
+            emit refocusRequested();
+            m_LastAxisNavigationEventTime = SDL_GetTicks();
+        }
+        // A layout that sends the stick as arrow keys echoes it like the D-pad (#24). The repeat
+        // delay still restarts, so a dropped step is not retried on the next poll.
+        else if (stickNav != NB_COUNT && padPressIsEcho(stickNav)) {
+            m_LastAxisNavigationEventTime = SDL_GetTicks();
         }
         else if (leftY < -30000) {
             if (m_UiNavMode) {
@@ -486,40 +949,106 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             m_LastAxisNavigationEventTime = SDL_GetTicks();
         }
 
-        // Triggers → previous / next host on the Home screen. Deliberately NOT
-        // routed through the repeat timer above: a trigger pull is one discrete
-        // step, not a direction you hold, so it is edge-detected with hysteresis
-        // (press above 20000, release below 8000) — a trigger resting just at the
-        // threshold would otherwise flip hosts continuously.
-        //
-        // Key_F14/F15 are inert like the Key_F13 used for Select: nothing in Qt
-        // treats them as activation, so only our explicit handlers consume them.
-        short leftTrigger  = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
-        short rightTrigger = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+        leftTriggerMax  = qMax(leftTriggerMax,  (int)SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+        rightTriggerMax = qMax(rightTriggerMax, (int)SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    }
 
-        if (!m_LeftTriggerDown && leftTrigger > 20000) {
-            m_LeftTriggerDown = true;
-            InputHints::get()->notePadInput();
-            sendKey(QEvent::Type::KeyPress, Qt::Key_F14);
-            sendKey(QEvent::Type::KeyRelease, Qt::Key_F14);
-        }
-        else if (m_LeftTriggerDown && leftTrigger < 8000) {
-            m_LeftTriggerDown = false;
-        }
+    // Triggers → the profile or the host, one step per pull. Deliberately NOT routed through
+    // the repeat timer above: a trigger pull is one discrete step, not a direction you hold, so
+    // it is edge-detected with hysteresis (press above 20000, release below 8000) — a trigger
+    // resting just at the threshold would otherwise flip hosts continuously.
+    //
+    // ⚠️ 8.0.0: on the strongest pull across ALL pads, outside the loop. The state is one flag
+    // per trigger, and inside the loop a second pad at rest cleared it on every poll: holding LT
+    // with two pads connected (Steam's virtual pad beside the real one, #24) stepped twenty
+    // times a second.
+    //
+    // Key_F14/F15 are inert like the Key_F13 used for Select: nothing in Qt treats them as
+    // activation, so only our explicit handlers consume them.
+    if (!m_LeftTriggerDown && leftTriggerMax > 20000) {
+        m_LeftTriggerDown = true;
+        InputHints::get()->notePadInput();
+        sendKey(QEvent::Type::KeyPress, Qt::Key_F14);
+        sendKey(QEvent::Type::KeyRelease, Qt::Key_F14);
+    }
+    else if (m_LeftTriggerDown && leftTriggerMax < 8000) {
+        m_LeftTriggerDown = false;
+    }
 
-        if (!m_RightTriggerDown && rightTrigger > 20000) {
-            m_RightTriggerDown = true;
-            InputHints::get()->notePadInput();
-            sendKey(QEvent::Type::KeyPress, Qt::Key_F15);
-            sendKey(QEvent::Type::KeyRelease, Qt::Key_F15);
+    if (!m_RightTriggerDown && rightTriggerMax > 20000) {
+        m_RightTriggerDown = true;
+        InputHints::get()->notePadInput();
+        sendKey(QEvent::Type::KeyPress, Qt::Key_F15);
+        sendKey(QEvent::Type::KeyRelease, Qt::Key_F15);
+    }
+    else if (m_RightTriggerDown && rightTriggerMax < 8000) {
+        m_RightTriggerDown = false;
+    }
+
+    setScrollVelocity(scrollVelocity);
+    setScrollVelocityX(scrollVelocityX);
+}
+
+void SdlGamepadKeyNavigation::setScrollVelocityX(qreal pxPerSecond)
+{
+    if (qFuzzyCompare(1.0 + m_ScrollVelocityX, 1.0 + pxPerSecond)) return;
+    m_ScrollVelocityX = pxPerSecond;
+    emit scrollVelocityXChanged();
+}
+
+void SdlGamepadKeyNavigation::setScrollVelocity(qreal pxPerSecond)
+{
+    if (qFuzzyCompare(1.0 + m_ScrollVelocity, 1.0 + pxPerSecond)) return;
+    m_ScrollVelocity = pxPerSecond;
+    emit scrollVelocityChanged();
+}
+
+void SdlGamepadKeyNavigation::setScrollAvailable(QObject* view, bool available)
+{
+    if (view == nullptr) return;
+    const bool before = !m_ScrollViews.isEmpty();
+    if (available && !m_ScrollViews.contains(view)) {
+        // A view destroyed while it could scroll must not leave the prompt on. One connection
+        // per view while it is in the set, dropped with it: availability flips at every focus
+        // move, and Qt::UniqueConnection does not work with a lambda.
+        m_ScrollViews.insert(view, connect(view, &QObject::destroyed, this, [this, view]() {
+            if (m_ScrollViews.remove(view) && m_ScrollViews.isEmpty()) emit scrollAvailableChanged();
+        }));
+    }
+    else if (!available && m_ScrollViews.contains(view)) {
+        disconnect(m_ScrollViews.take(view));
+    }
+    if (before != !m_ScrollViews.isEmpty()) emit scrollAvailableChanged();
+}
+
+void SdlGamepadKeyNavigation::sendDpad(int sdlButton, QEvent::Type type, bool autoRepeat)
+{
+    switch (sdlButton) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        if (m_UiNavMode) {
+            // Back-tab
+            sendKey(type, Qt::Key_Tab, Qt::ShiftModifier, autoRepeat);
         }
-        else if (m_RightTriggerDown && rightTrigger < 8000) {
-            m_RightTriggerDown = false;
+        else {
+            sendKey(type, Qt::Key_Up, Qt::NoModifier, autoRepeat);
         }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        sendKey(type, m_UiNavMode ? Qt::Key_Tab : Qt::Key_Down, Qt::NoModifier, autoRepeat);
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        sendKey(type, Qt::Key_Left, Qt::NoModifier, autoRepeat);
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        sendKey(type, Qt::Key_Right, Qt::NoModifier, autoRepeat);
+        break;
+    default:
+        break;
     }
 }
 
-void SdlGamepadKeyNavigation::sendKey(QEvent::Type type, Qt::Key key, Qt::KeyboardModifiers modifiers)
+void SdlGamepadKeyNavigation::sendKey(QEvent::Type type, Qt::Key key, Qt::KeyboardModifiers modifiers,
+                                      bool autoRepeat)
 {
     QGuiApplication* app = static_cast<QGuiApplication*>(QGuiApplication::instance());
     QWindow* focusWindow = app->focusWindow();
@@ -529,8 +1058,16 @@ void SdlGamepadKeyNavigation::sendKey(QEvent::Type type, Qt::Key key, Qt::Keyboa
               .arg(m_UiNavMode ? 1 : 0)
               .arg(focusWindow ? "OK" : "NULL"));
     if (focusWindow != nullptr) {
-        QKeyEvent keyPressEvent(type, key, modifiers);
+        // Read before delivery: a press can move the focus into a text field (or out of one),
+        // and what counts is where it was when the key arrived.
+        const bool wasText = type == QEvent::Type::KeyPress && UiSound::focusIsText(focusWindow);
+        QKeyEvent keyPressEvent(type, key, modifiers, QString(), autoRepeat);
         app->sendEvent(focusWindow, &keyPressEvent);
+        // 7.0.0: the navigation sound, only if a control took the key — see UiSound.
+        if (type == QEvent::Type::KeyPress) {
+            UiSound::get()->noteKey(focusWindow, key, modifiers, autoRepeat,
+                                    keyPressEvent.isAccepted(), wasText);
+        }
     }
 }
 
@@ -538,6 +1075,11 @@ void SdlGamepadKeyNavigation::updateTimerState()
 {
     if (m_PollingTimer->isActive() && (!m_HasFocus || !m_Enabled)) {
         m_PollingTimer->stop();
+        // No poll, no stick: a view must not go on scrolling at the last speed read, and a
+        // D-pad held as the window lost focus must not repeat when it comes back.
+        setScrollVelocity(0);
+        setScrollVelocityX(0);
+        m_HeldDpad = -1;
         slDbg("polling timer STOPPED");
     }
     else if (!m_PollingTimer->isActive() && m_HasFocus && m_Enabled) {

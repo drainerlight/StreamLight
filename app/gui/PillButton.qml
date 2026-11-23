@@ -11,13 +11,22 @@ FocusScope {
 
     property string text: ""
     property bool   selected: false
+    // 7.0.0: a colour square before the text (the Accent colour row shows its colour), and a
+    // chevron after it for a button that opens a popup rather than choosing a value.
+    property color  swatch: "transparent"
+    property bool   chevron: false
     signal clicked()
 
-    readonly property color _accent: Theme.accent
+    readonly property color _accent: Theme.accentFill
     // Same tokens as one SegmentedSelector pill — the two are meant to be indistinguishable,
     // so they have to derive their colours the same way rather than each hardcoding them.
-    readonly property color _bgPill: Qt.tint(Theme.card, Qt.rgba(Theme.accent.r, Theme.accent.g,
-                                                                 Theme.accent.b, 0.07))
+    //
+    // ⚠️ Glass since 05/11/2026 (Marcello, variant A of docs/mockups/pulsanti): the container is
+    // a wash of the reading colour under Theme.lineHigh, the selection the same glass tinted by
+    // the accent (18%) under a 55% accent hairline, with the words in Theme.text. It was a solid
+    // card-coloured pill (tinted 7%, 50% opaque) with a solid accent selection and dark words.
+    readonly property color _bgPill: Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b,
+                                             hov.active ? 0.08 : 0.05)
 
     // Same scale, read the same way, as SegmentedSelector — read the note there. These two
     // are meant to be indistinguishable, so they cannot take it from different places.
@@ -37,11 +46,9 @@ FocusScope {
     Rectangle {
         anchors.fill: parent
         radius: btn._px(8)
-        color: btn._bgPill
-        border.color: hov.keyFocused ? btn._accent
-                    : hov.active     ? Theme.lineHigh
-                    :                  Theme.line
-        border.width: hov.keyFocused ? 3 : 1
+        color: hov.keyFocused ? Qt.rgba(btn._accent.r, btn._accent.g, btn._accent.b, 0.10) : btn._bgPill
+        border.color: hov.keyFocused ? btn._accent : Theme.lineHigh
+        border.width: hov.keyFocused ? 2 : 1
 
         Behavior on border.color {
             enabled: !Theme.reduceAnimations
@@ -49,35 +56,72 @@ FocusScope {
         }
     }
 
+    readonly property bool _hasSwatch: btn.swatch.a > 0
+
     Item {
         id: pill
         anchors.centerIn: parent
-        implicitWidth: lbl.implicitWidth + btn._px(28)
+        implicitWidth: content.implicitWidth + btn._px(28)
         implicitHeight: btn._px(30)
         width: implicitWidth; height: implicitHeight
 
         Rectangle {
             anchors.fill: parent; anchors.margins: btn._px(2); radius: btn._px(5)
-            color: btn.selected ? btn._accent : "transparent"
+            color: btn.selected ? Qt.rgba(btn._accent.r, btn._accent.g, btn._accent.b, 0.18) : "transparent"
+            border.width: btn.selected ? 1 : 0
+            border.color: Qt.rgba(btn._accent.r, btn._accent.g, btn._accent.b, 0.55)
         }
-        Label {
-            id: lbl
+        Row {
+            id: content
             anchors.centerIn: parent
-            text: btn.text
-            color: btn.selected ? Theme.onAccent : Theme.text2
-            font.family: Theme.family; font.pixelSize: btn._px(Theme.fontSmall)
-            font.bold: btn.selected
+            spacing: btn._px(8)
+            Rectangle {
+                visible: btn._hasSwatch
+                anchors.verticalCenter: parent.verticalCenter
+                width: btn._px(20); height: width
+                // 8.8.2: a circle, not a rounded square. The square's straight sides showed a 1 px
+                // outline thicker on one side than the other at fractional Windows scaling
+                // (Marcello, 13/11/2026); a round edge has no straight side to show it.
+                radius: width / 2
+                color: btn.swatch
+                border.color: Theme.lineHigh
+                border.width: 1
+            }
+            Label {
+                id: lbl
+                anchors.verticalCenter: parent.verticalCenter
+                text: btn.text
+                color: (btn.selected || btn._hasSwatch) ? Theme.text : Theme.text2
+                font.family: Theme.family; font.pixelSize: btn._px(Theme.fontSmall * Theme.textScale)
+                font.bold: btn.selected || btn._hasSwatch
+            }
+            Label {
+                visible: btn.chevron
+                anchors.verticalCenter: parent.verticalCenter
+                text: "›"
+                color: Theme.text3
+                font.family: Theme.family; font.pixelSize: btn._px(Theme.fontTitle * Theme.textScale)
+            }
         }
     }
 
     MouseArea {
+        id: pillMouse
         anchors.fill: parent
         // cursorShape moved to HoverState: left here it would keep showing a pointing hand
         // after the state had gone back to an arrow for the pad.
         onClicked: { btn.forceActiveFocus(); btn.clicked() }
     }
 
-    Keys.onReturnPressed: btn.clicked()
-    Keys.onEnterPressed:  btn.clicked()
-    Keys.onSpacePressed:  btn.clicked()
+    Keys.onReturnPressed: { press.kick(); btn.clicked() }
+    Keys.onEnterPressed:  { press.kick(); btn.clicked() }
+    Keys.onSpacePressed:  { press.kick(); btn.clicked() }
+
+    // 7.0.0: the press dips the pill and it springs back.
+    PressBounce { id: press; down: pillMouse.pressed }
+    scale: press.scale
+    Behavior on scale {
+        enabled: !Theme.reduceAnimations
+        NumberAnimation { duration: 140; easing.type: Easing.OutBack; easing.overshoot: 2.0 }
+    }
 }

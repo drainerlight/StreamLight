@@ -4,12 +4,14 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QDeadlineTimer>
+#include <QMutex>
 #include <QStringList>
 #include <QSysInfo>
 #include <QTcpSocket>
 #include <QTextStream>
 #include <QTimer>
 
+#include <atomic>
 #include <memory>
 
 #include <openssl/evp.h>
@@ -40,14 +42,33 @@ QByteArray StreamTweakBridge::signPayload(const QByteArray& payload)
     if (keyPem.isEmpty())
         return {};
 
-    BIO* bio = BIO_new_mem_buf(keyPem.constData(), keyPem.size());
-    if (!bio)
-        return {};
+    // 8.8.2: the key is parsed once and kept. Every command to the host is signed (several a
+    // second with the Home on screen, one a second during a stream) and each signature used to
+    // parse the PEM again. Kept with the PEM it came from, so a new identity is never signed
+    // with the old key; each signature works on its own reference.
+    static QMutex s_KeyLock;
+    static QByteArray s_KeyPem;
+    static EVP_PKEY* s_Key = nullptr;
 
-    EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-    BIO_free(bio);
-    if (!pkey)
-        return {};
+    EVP_PKEY* pkey = nullptr;
+    {
+        QMutexLocker locker(&s_KeyLock);
+        if (s_Key == nullptr || s_KeyPem != keyPem) {
+            BIO* bio = BIO_new_mem_buf(keyPem.constData(), keyPem.size());
+            if (!bio)
+                return {};
+            EVP_PKEY* parsed = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+            BIO_free(bio);
+            if (!parsed)
+                return {};
+            if (s_Key != nullptr)
+                EVP_PKEY_free(s_Key);
+            s_Key = parsed;
+            s_KeyPem = keyPem;
+        }
+        EVP_PKEY_up_ref(s_Key);
+        pkey = s_Key;
+    }
 
     QByteArray sig;
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
@@ -72,7 +93,18 @@ QByteArray StreamTweakBridge::signPayload(const QByteArray& payload)
 QString StreamTweakBridge::buildAuthLine(const QString& command)
 {
     QString uid = IdentityManager::get()->getUniqueId();
+    // ⚠️ 8.8.3 (StreamTweak #17): never the same millisecond twice. RSA PKCS#1 v1.5 signatures are
+    // deterministic, so two identical commands signed in the same millisecond carry the SAME
+    // signature, and the host refuses the second as a replay. The Home can ask the same thing twice
+    // at once (a probe timer and a reply that triggers the same request); each signed line now
+    // gets a timestamp past the previous one. One counter for every bridge in the process.
+    static std::atomic<qint64> s_LastTs { 0 };
     qint64 ts = QDateTime::currentMSecsSinceEpoch();
+    qint64 last = s_LastTs.load();
+    while (true) {
+        const qint64 next = ts > last ? ts : last + 1;
+        if (s_LastTs.compare_exchange_weak(last, next)) { ts = next; break; }
+    }
     QByteArray payload = (uid + "\n" + QString::number(ts) + "\n" + command).toUtf8();
     QByteArray sig = signPayload(payload);
     if (sig.isEmpty())
@@ -92,10 +124,12 @@ QString StreamTweakBridge::buildAuthLine(const QString& command)
 // (sendRestore() is further down and in use: it is how the client puts the host's link back
 //  when the user answers the prompt. This note used to say it had been removed.)
 
-void StreamTweakBridge::sendShutdown(const QString& hostAddress, bool installUpdates)
+// ⚠️ 8.8.4: never SHUTDOWN_UPDATE any more. The update it asks for is one staged for a shut down,
+// while the "pending" the Power dialog shows is installed and waiting for a restart — the host
+// simply shut down and the update stayed (§120). Restart finishes those, with POWER.
+void StreamTweakBridge::sendShutdown(const QString& hostAddress)
 {
-    sendCommand(hostAddress, installUpdates ? QStringLiteral("SHUTDOWN_UPDATE")
-                                            : QStringLiteral("SHUTDOWN"));
+    sendCommand(hostAddress, QStringLiteral("SHUTDOWN"));
 }
 
 void StreamTweakBridge::requestPowerCaps(const QString& hostAddress, ResponseCallback onResult)
@@ -214,6 +248,11 @@ void StreamTweakBridge::requestStats(const QString& hostAddress, ResponseCallbac
 void StreamTweakBridge::requestGameState(const QString& hostAddress, ResponseCallback onResult)
 {
     sendRequest(hostAddress, QStringLiteral("GAMESTATE"), std::move(onResult));
+}
+
+void StreamTweakBridge::requestGameAlive(const QString& hostAddress, ResponseCallback onResult)
+{
+    sendRequest(hostAddress, QStringLiteral("GAMEALIVE"), std::move(onResult));
 }
 
 // requestSessionId() (SESSIONID) was removed in 4.6.0: like sendRestore(), it had no
@@ -346,6 +385,18 @@ QString StreamTweakBridge::requestSync(const QString& hostAddress, const QString
 }
 
 // ── Capability negotiation / enrollment (unauthenticated bootstrap) ─────────
+
+void StreamTweakBridge::requestHostSection(const QString& hostAddress, const QString& verb,
+                                           ResponseCallback onResult)
+{
+    sendRequest(hostAddress, verb, std::move(onResult));
+}
+
+void StreamTweakBridge::sendHostSetting(const QString& hostAddress, const QString& command,
+                                        ResponseCallback onResult)
+{
+    sendRequest(hostAddress, command, std::move(onResult));
+}
 
 void StreamTweakBridge::requestCaps(const QString& hostAddress, ResponseCallback onResult)
 {

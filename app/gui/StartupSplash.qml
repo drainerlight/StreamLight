@@ -2,9 +2,11 @@
 // `import QtQuick 2.15` do not mix safely, and qmlcachegen would not say so at build time.
 import QtQuick
 import QtQuick.Effects
+import QtQuick.Shapes
 import QtQuick.Window
 
 import Theme 1.0
+import InputHints 1.0
 
 /*
  * The opening animation (6.0.0): "B · Scia di luce", chosen by Marcello from a mockup of three
@@ -46,6 +48,22 @@ import Theme 1.0
  * ⚠️ AppShell decides ONCE, at launch, whether this plays (Theme.startupAnimation, not under
  * reduceAnimations, not for a command-line launch). Flipping the setting later changes the
  * next start, never the running app.
+ *
+ * 8.2.0 — the CHOICE (`choice`, a launch by the sign-in task, backend/signinlaunch.h). Mockup B
+ * «Sotto il nome», chosen by Marcello on 28/10/2026 (docs/mockups/avvio/). The timeline stops
+ * at fadeAt instead of fading into Home: icon and word rise a little, two buttons come up under
+ * the word — A Start StreamLight, B Windows desktop — and the ring comes back around the icon
+ * as a 10 s countdown towards StreamLight, which the first key or mouse movement stops. A picks
+ * StreamLight and the fade into Home runs as usual; B asks AppShell to close the app. With the
+ * animation off (setting or Reduce animations) the choice still shows, from its first frame.
+ * ⚠️ Home is not loaded and no host is polled until StreamLight is picked — that is AppShell's
+ * and main.qml's half (SignInLaunch.holding), and why a pick must emit before `_picked` moves.
+ *
+ * 8.3.0 (Marcello, 30/10/2026): no focus at first — the filled Start button looked like a cursor
+ * the D-pad could move, and it could not. A and B choose directly. The first arrow (the pad's
+ * D-pad) shows the focus on Start, the next ones move it, the prompt moves with it — A, on the
+ * focused button only — and A takes it (`_navIndex`). Any key stops the countdown, the D-pad
+ * included.
  */
 FocusScope {
     id: splash
@@ -58,8 +76,43 @@ FocusScope {
     property bool running: false
     property real t: 0
 
+    /** 8.2.0: this launch came from the sign-in task — stop on the choice instead of fading. */
+    property bool choice: false
+    /**
+     * 8.2.0: the session is still behind the lock screen (SignInLaunch.waitingForUnlock). The
+     * splash has started but its clock has not: nothing moves and nothing counts down until it
+     * turns false — the choice must be seen to be made.
+     */
+    property bool held: false
+    property bool _animate: true
+    signal streamLightChosen()
+    signal desktopChosen()
+
+    readonly property real countdownSecs: 10
+    property real cdLeft: countdownSecs
+    // Nobody has touched anything yet: the countdown runs.
+    property bool _counting: true
+    property bool _picked: false
+    property bool _leaving: false
+    // The button the D-pad has focused: -1 none (A Start, B desktop), 0 Start, 1 desktop.
+    property int _navIndex: -1
+    // Wall-clock start of the choice (ms) and the seconds since — the choice has its own clock,
+    // because t holds still at fadeAt while it is on screen.
+    property real _choiceAt: 0
+    property real _ct: 0
+    // Where the pointer was when the choice came up, in scene coordinates (-1: not seen yet).
+    property real _mouseX: -1
+    property real _mouseY: -1
+
+    /** The two buttons are on screen and answer. */
+    readonly property bool choosing: running && choice && !_picked && !_leaving && t >= fadeAt
+    /** How far the choice has come in, 0 → 1 over 0.7 s, and 1 from then on. */
+    readonly property real _ch: !choice ? 0
+                                : Theme.reduceAnimations ? (t >= fadeAt ? 1 : 0)
+                                : _outCubic(_clamp(_ct / 0.7))
+
     /** Home must not take input yet. */
-    readonly property bool blocking: running && t < fadeAt
+    readonly property bool blocking: running && (t < fadeAt || (choice && !_picked))
     /** 0 while the splash owns the screen, 1 once Home does. */
     readonly property real homeOpacity: running ? _inOut(_clamp((t - fadeAt) / (total - fadeAt))) : 1
     /** How far the waves have risen — AppShell hands it to AmbientBackground. 1 when not running. */
@@ -76,9 +129,12 @@ FocusScope {
     readonly property string _word: "STREAMLIGHT"
 
     // The accent, half way to white: what a letter shows at the peak of its glow.
-    readonly property color _hot: Qt.rgba(Theme.accent.r + (1 - Theme.accent.r) * 0.55,
-                                          Theme.accent.g + (1 - Theme.accent.g) * 0.55,
-                                          Theme.accent.b + (1 - Theme.accent.b) * 0.55, 1)
+    // 7.0.0, Light: the splash stands on the app's floor, which is pale there, and a glow half
+    // way to white would not show on it — so the peak is the ink, the accent darkened to hold.
+    readonly property color _hot: Theme.light ? Theme.ink
+                                  : Qt.rgba(Theme.accent.r + (1 - Theme.accent.r) * 0.55,
+                                            Theme.accent.g + (1 - Theme.accent.g) * 0.55,
+                                            Theme.accent.b + (1 - Theme.accent.b) * 0.55, 1)
 
     // Phases, as in the mockup.
     readonly property real _pIcon: _clamp((t - 0.5) / 0.8)
@@ -94,14 +150,87 @@ FocusScope {
     function _inOut(x) { return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2 }
     function _outCubic(x) { return 1 - Math.pow(1 - x, 3) }
 
-    function start() {
+    // atSignIn (8.2.0): stop on the choice. animate === false: no animation, the choice from
+    // the first frame (a sign-in launch with the animation off).
+    function start(atSignIn, animate) {
+        _animate = animate !== false
+        choice = atSignIn === true
+        _picked = false
+        _leaving = false
+        _navIndex = -1
+        _counting = true
+        cdLeft = countdownSecs
+        _choiceAt = 0
+        _ct = 0
+        _mouseX = -1
+        _mouseY = -1
         running = true
         t = 0
         _t0 = 0
-        _startedAt = Date.now()
-        _waitingFrame = true
-        firstFrameFallback.start()
+        _waitingFrame = false
         forceActiveFocus()
+        // Behind the lock screen: the floor only, and the clock starts at the unlock (onHeldChanged).
+        if (!held)
+            _begin()
+    }
+
+    function _begin() {
+        _startedAt = Date.now()
+        if (!_animate) {
+            _waitingFrame = false
+            _t0 = Date.now() - fadeAt * 1000
+            t = fadeAt
+        } else {
+            _waitingFrame = true
+            firstFrameFallback.start()
+        }
+    }
+
+    onHeldChanged: {
+        if (!held && running && _t0 === 0 && !_waitingFrame)
+            _begin()
+    }
+
+    // Someone is there: the countdown stops, and the log says what stopped it.
+    function _stopCountdown(why) {
+        if (!_counting) return
+        _counting = false
+        console.info("[signin] countdown stopped by " + why + ", " + cdLeft.toFixed(1) + " s left")
+    }
+
+    /*
+     * The pointer moved. ⚠️ A real move only: when the buttons come up under a pointer that is
+     * standing still, Qt still sends a position event to the hover areas that appear beneath it,
+     * and the countdown stopped by itself at sign-in (measured 28/10/2026, first build). So the
+     * first position seen is only remembered, and it takes a few pixels away from it.
+     */
+    function _pointerAt(x, y) {
+        if (!choosing) return
+        if (_mouseX < 0) {
+            _mouseX = x
+            _mouseY = y
+            return
+        }
+        if (Math.abs(x - _mouseX) + Math.abs(y - _mouseY) > 6)
+            _stopCountdown("the mouse")
+    }
+
+    function pick(streamLight) {
+        if (!choosing) return
+        _counting = false
+        console.info("[signin] " + (streamLight ? "StreamLight" : "desktop") + " chosen "
+                     + _ct.toFixed(1) + " s into the choice")
+        if (!streamLight) {
+            // AppShell closes the app; the choice stays on screen, deaf, until it does.
+            _leaving = true
+            desktopChosen()
+            return
+        }
+        // ⚠️ First the signal — AppShell releases the hosts and loads Home, which must exist
+        // before blocking turns false — then the fade, as at the end of the plain animation.
+        streamLightChosen()
+        _picked = true
+        _t0 = Date.now() - (Theme.reduceAnimations ? total : fadeAt) * 1000
     }
 
     // Step 2: the window has something on screen — the picture starts now.
@@ -120,7 +249,7 @@ FocusScope {
     }
 
     function skip() {
-        if (!running || t >= fadeAt) return
+        if (!running || held || t >= fadeAt) return
         // Also before the picture has even started: stop waiting for the first frame.
         _waitingFrame = false
         firstFrameFallback.stop()
@@ -144,26 +273,60 @@ FocusScope {
     FrameAnimation {
         running: splash.running && splash._t0 > 0
         onTriggered: {
-            splash.t = Math.min(splash.total, (Date.now() - splash._t0) / 1000)
+            // Held at fadeAt while the choice is up.
+            var cap = (splash.choice && !splash._picked) ? splash.fadeAt : splash.total
+            splash.t = Math.min(cap, (Date.now() - splash._t0) / 1000)
+            if (splash.choosing) {
+                if (splash._choiceAt === 0) splash._choiceAt = Date.now()
+                splash._ct = (Date.now() - splash._choiceAt) / 1000
+                // From when the buttons are fully in.
+                if (splash._counting && splash._ct > 0.7) {
+                    splash.cdLeft = Math.max(0, splash.countdownSecs - (splash._ct - 0.7))
+                    if (splash.cdLeft <= 0) splash.pick(true)
+                }
+            }
             if (splash.t >= splash.total) splash._finish()
         }
     }
 
     Keys.onPressed: function(event) {
-        splash.skip()
         event.accepted = true
+        if (splash.choosing) {
+            // Any key: someone is there, the countdown stops. A and B also choose — on the pad
+            // A is Return (Space in unlock mode), B is Escape.
+            // The arrows show the focus, then move it; A takes the focused button.
+            var k = event.key
+            splash._stopCountdown("key 0x" + k.toString(16))
+            var back = k === Qt.Key_Left || k === Qt.Key_Up || k === Qt.Key_Backtab
+                       || (k === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))
+            var fwd = !back && (k === Qt.Key_Right || k === Qt.Key_Down || k === Qt.Key_Tab)
+            if (back || fwd)
+                splash._navIndex = splash._navIndex < 0 ? 0 : (fwd ? 1 : 0)
+            else if (k === Qt.Key_Return || k === Qt.Key_Enter || k === Qt.Key_Space)
+                splash.pick(splash._navIndex !== 1)
+            else if (k === Qt.Key_Escape || k === Qt.Key_Back)
+                splash.pick(false)
+            return
+        }
+        splash.skip()
     }
 
     MouseArea {
         anchors.fill: parent
         enabled: splash.blocking
+        hoverEnabled: splash.choosing
         onClicked: splash.skip()
+        onPositionChanged: function(mouse) {
+            var p = mapToItem(null, mouse.x, mouse.y)
+            splash._pointerAt(p.x, p.y)
+        }
     }
 
     Column {
         id: brand
         anchors.horizontalCenter: parent.horizontalCenter
-        y: Math.round(parent.height * 0.44 - height / 2)
+        // 8.2.0: a little higher with the choice in, to make room for the buttons under it.
+        y: Math.round(parent.height * (0.44 - 0.08 * splash._ch) - height / 2)
         spacing: Math.round(27 * splash._u)
         opacity: 1 - splash.homeOpacity
 
@@ -179,10 +342,50 @@ FocusScope {
                 height: width
                 radius: width / 2
                 color: "transparent"
-                border.color: Theme.accent
+                border.color: Theme.ink
                 border.width: Math.max(1, (1 + 2 * (1 - splash._pRing)) * splash._u)
                 opacity: (1 - splash._pRing) * 0.8
                 visible: splash._pRing > 0 && splash._pRing < 1
+            }
+
+            // 8.2.0: the ring again, as the countdown — it closes on the icon in 10 s, and goes
+            // when the countdown stops.
+            Shape {
+                id: countdownRing
+                anchors.centerIn: parent
+                readonly property real r: splash._iconSize * 0.64
+                readonly property real stroke: Math.max(2, 3 * splash._u)
+                width: Math.ceil(r * 2 + stroke * 2)
+                height: width
+                visible: splash.choice && splash._ch > 0
+                opacity: splash._ch * (splash._counting ? 1 : 0)
+                Behavior on opacity {
+                    enabled: !Theme.reduceAnimations
+                    NumberAnimation { duration: 300 }
+                }
+                preferredRendererType: Shape.CurveRenderer
+                ShapePath {
+                    strokeColor: Theme.line
+                    strokeWidth: countdownRing.stroke
+                    fillColor: "transparent"
+                    PathAngleArc {
+                        centerX: countdownRing.width / 2; centerY: countdownRing.height / 2
+                        radiusX: countdownRing.r; radiusY: countdownRing.r
+                        startAngle: 0; sweepAngle: 360
+                    }
+                }
+                ShapePath {
+                    strokeColor: Theme.ink
+                    strokeWidth: countdownRing.stroke
+                    fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+                    PathAngleArc {
+                        centerX: countdownRing.width / 2; centerY: countdownRing.height / 2
+                        radiusX: countdownRing.r; radiusY: countdownRing.r
+                        startAngle: -90
+                        sweepAngle: 360 * splash.cdLeft / splash.countdownSecs
+                    }
+                }
             }
 
             Image {
@@ -232,7 +435,7 @@ FocusScope {
                         font.family: Theme.family
                         font.pixelSize: splash._fontPx
                         font.bold: true
-                        color: Theme.accent
+                        color: Theme.ink
                         visible: false
                     }
                     MultiEffect {
@@ -259,6 +462,147 @@ FocusScope {
                                                            splash._hot.b, letter._glow))
                     }
                 }
+            }
+        }
+    }
+
+    // ── 8.2.0: the choice ─────────────────────────────────────────────────────────────────
+    // A button with its prompt: the pad glyph while a pad is in use, the key otherwise. Tinted
+    // by the accent only when the D-pad has focused it (8.3.0; glass, not a fill, since 05/11/2026).
+    component ChoiceButton: Rectangle {
+        id: btn
+        property string buttonKey: "A"
+        property string keyLabel: "Enter"
+        property string text: ""
+        property bool focused: false
+        // The prompt beside the label: with the D-pad's focus, only the focused button has one.
+        property bool showPrompt: true
+        // An inline component cannot see this file's ids: the scale and the state come in.
+        property real u: 1
+        property bool live: false
+        signal activated()
+        // Where the pointer is, in scene coordinates — see splash._pointerAt().
+        signal touched(real x, real y)
+
+        readonly property color _fg: Theme.text
+
+        height: Math.round(58 * btn.u)
+        width: btnRow.implicitWidth + Math.round(48 * btn.u)
+        radius: height / 2
+        // Glass (05/11/2026, variant A of docs/mockups/pulsanti): a wash under Theme.lineHigh,
+        // brighter under the pointer; focused, the wash tinted by the accent (22%) under a
+        // 2 px accent border. It used to fill with the accent when focused.
+        color: focused ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b,
+                                 btnMouse.containsMouse ? 0.28 : 0.22)
+                       : Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b,
+                                 btnMouse.containsMouse ? 0.15 : 0.08)
+        border.color: focused ? Theme.accentFill : Theme.lineHigh
+        border.width: focused ? Math.max(2, 2 * btn.u) : Math.max(1, 1.5 * btn.u)
+
+        Row {
+            id: btnRow
+            anchors.centerIn: parent
+            spacing: Math.round(12 * btn.u)
+
+            // Hidden by opacity, not removed: the buttons keep their width as the focus moves.
+            PadGlyph {
+                visible: InputHints.padActive
+                opacity: btn.showPrompt ? 1 : 0
+                anchors.verticalCenter: parent.verticalCenter
+                buttonKey: btn.buttonKey
+                label: btn.buttonKey
+                size: Math.round(26 * btn.u)
+            }
+            Rectangle {
+                visible: !InputHints.padActive
+                opacity: btn.showPrompt ? 1 : 0
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.max(height, capText.implicitWidth + Math.round(14 * btn.u))
+                height: Math.round(24 * btn.u)
+                radius: Math.round(6 * btn.u)
+                color: "transparent"
+                border.color: Qt.rgba(btn._fg.r, btn._fg.g, btn._fg.b, 0.45)
+                border.width: 1
+                Text {
+                    id: capText
+                    anchors.centerIn: parent
+                    text: btn.keyLabel
+                    color: btn._fg
+                    font.family: Theme.family
+                    font.pixelSize: Math.max(11, Math.round(12 * btn.u))
+                    font.bold: true
+                }
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: btn.text
+                color: btn._fg
+                font.family: Theme.family
+                font.pixelSize: Math.round(Theme.fontTitle * btn.u)
+                font.weight: btn.focused ? Font.DemiBold : Font.Medium
+            }
+        }
+
+        MouseArea {
+            id: btnMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            enabled: btn.live
+            onPositionChanged: function(mouse) {
+                var p = btnMouse.mapToItem(null, mouse.x, mouse.y)
+                btn.touched(p.x, p.y)
+            }
+            onClicked: btn.activated()
+        }
+    }
+
+    Column {
+        id: choiceBlock
+        visible: splash.choice && splash._ch > 0
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: brand.y + brand.height + Math.round(52 * splash._u) + (1 - splash._ch) * 22 * splash._u
+        spacing: Math.round(26 * splash._u)
+        opacity: splash._ch * (1 - splash.homeOpacity)
+
+        Row {
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: Math.round(20 * splash._u)
+
+            ChoiceButton {
+                focused: splash._navIndex === 0
+                showPrompt: splash._navIndex !== 1
+                u: splash._u
+                live: splash.choosing
+                onTouched: function(x, y) { splash._pointerAt(x, y) }
+                buttonKey: "A"
+                keyLabel: "Enter"
+                text: qsTr("Start StreamLight")
+                onActivated: splash.pick(true)
+            }
+            // With the D-pad's focus the prompt is A, on the focused button only: A takes it.
+            ChoiceButton {
+                focused: splash._navIndex === 1
+                showPrompt: splash._navIndex !== 0
+                u: splash._u
+                live: splash.choosing
+                onTouched: function(x, y) { splash._pointerAt(x, y) }
+                buttonKey: splash._navIndex >= 0 ? "A" : "B"
+                keyLabel: splash._navIndex >= 0 ? "Enter" : "Esc"
+                text: qsTr("Windows desktop")
+                onActivated: splash.pick(false)
+            }
+        }
+
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: qsTr("StreamLight opens in %1 s").arg(Math.ceil(splash.cdLeft))
+            color: Theme.text3
+            font.family: Theme.family
+            font.pixelSize: Math.round(Theme.fontBody * splash._u)
+            opacity: splash._counting ? 1 : 0
+            Behavior on opacity {
+                enabled: !Theme.reduceAnimations
+                NumberAnimation { duration: 300 }
             }
         }
     }

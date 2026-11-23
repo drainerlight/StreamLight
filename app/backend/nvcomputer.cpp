@@ -28,12 +28,16 @@
 #define SER_TAILSCALEADDR "tailscaleaddress"
 #define SER_TAILSCALEPORT "tailscaleport"
 #define SER_STAGEIMAGE "stageimage"
-#define SER_STAGESEED "stageseed"
-#define SER_STAGEFROM "stagefrom"
-#define SER_STAGETO "stageto"
+#define SER_STAGEIMAGE_LIGHT "stageimagelight"
+// Written by 7.0.0's development builds, no longer read: removed from each host on its next save.
+#define SER_STAGEPICOPACITY_OLD "stagepictureopacity"
+#define SER_STAGESEED_OLD "stageseed"
+#define SER_STAGEFROM_OLD "stagefrom"
+#define SER_STAGETO_OLD "stageto"
 #define SER_STAGEOPACITY "stageopacity"
 #define SER_STENABLED "streamtweakenabled"
 #define SER_HELDASLEEP "heldasleep"
+#define SER_WAKEMAC "wakemac"
 
 NvComputer::NvComputer(QSettings& settings)
 {
@@ -41,6 +45,7 @@ NvComputer::NvComputer(QSettings& settings)
     this->uuid = settings.value(SER_UUID).toString();
     this->hasCustomName = settings.value(SER_CUSTOMNAME).toBool();
     this->macAddress = settings.value(SER_MAC).toByteArray();
+    this->wakeMacAddress = settings.value(SER_WAKEMAC).toByteArray();
     this->localAddress = NvAddress(settings.value(SER_LOCALADDR).toString(),
                                    settings.value(SER_LOCALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->remoteAddress = NvAddress(settings.value(SER_REMOTEADDR).toString(),
@@ -49,16 +54,23 @@ NvComputer::NvComputer(QSettings& settings)
                                   settings.value(SER_IPV6PORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->manualAddress = NvAddress(settings.value(SER_MANUALADDR).toString(),
                                     settings.value(SER_MANUALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
-    this->tailscaleAddress = NvAddress(settings.value(SER_TAILSCALEADDR).toString(),
+    // ⚠️ 8.8.3 (StreamTweak #17): up to 8.8.2 a refused TAILSCALE request stored the bridge's
+    // "ERR_UNAUTHORIZED" here as if it were an address. Such a value is dropped on load, and the
+    // host is saved without it at its next save. Only "ERR_" is matched: a Tailscale address can
+    // legitimately be a name (a manual MagicDNS entry), and a host name never holds an underscore.
+    QString tailscaleAddr = settings.value(SER_TAILSCALEADDR).toString();
+    if (tailscaleAddr.startsWith(QStringLiteral("ERR_")))
+        tailscaleAddr.clear();
+    this->tailscaleAddress = NvAddress(tailscaleAddr,
                                        settings.value(SER_TAILSCALEPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->serverCert = QSslCertificate(settings.value(SER_SRVCERT).toByteArray());
     this->isNvidiaServerSoftware = settings.value(SER_NVIDIASOFTWARE).toBool();
     this->aliasSuffix = settings.value(SER_ALIASSUFFIX).toString();
     this->isAddressPinned = settings.value(SER_ADDRESSPINNED, false).toBool();
     this->stageImagePath = settings.value(SER_STAGEIMAGE).toString();
-    this->stageSeedColor = settings.value(SER_STAGESEED).toString();
-    this->stageColorFrom = settings.value(SER_STAGEFROM).toString();
-    this->stageColorTo   = settings.value(SER_STAGETO).toString();
+    // Absent until the Light theme gets a picture of its own: present-but-empty means "none".
+    this->stageImageLightSet = settings.contains(SER_STAGEIMAGE_LIGHT);
+    this->stageImagePathLight = settings.value(SER_STAGEIMAGE_LIGHT).toString();
     // Absent on every host saved before 6.0.0: 0, which means "use the default".
     this->stageOpacity   = settings.value(SER_STAGEOPACITY, 0).toInt();
     this->heldAsleep     = settings.value(SER_HELDASLEEP, false).toBool();
@@ -164,6 +176,12 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
     settings.setValue(SER_CUSTOMNAME, hasCustomName);
     settings.setValue(SER_UUID, uuid);
     settings.setValue(SER_MAC, macAddress);
+    if (!wakeMacAddress.isEmpty()) {
+        settings.setValue(SER_WAKEMAC, wakeMacAddress);
+    }
+    else {
+        settings.remove(SER_WAKEMAC);
+    }
     settings.setValue(SER_LOCALADDR, localAddress.address());
     settings.setValue(SER_LOCALPORT, localAddress.port());
     settings.setValue(SER_REMOTEADDR, remoteAddress.address());
@@ -179,9 +197,16 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
     settings.setValue(SER_ALIASSUFFIX, aliasSuffix);
     settings.setValue(SER_ADDRESSPINNED, isAddressPinned);
     settings.setValue(SER_STAGEIMAGE, stageImagePath);
-    settings.setValue(SER_STAGESEED, stageSeedColor);
-    settings.setValue(SER_STAGEFROM, stageColorFrom);
-    settings.setValue(SER_STAGETO, stageColorTo);
+    if (stageImageLightSet) {
+        settings.setValue(SER_STAGEIMAGE_LIGHT, stageImagePathLight);
+    }
+    else {
+        settings.remove(SER_STAGEIMAGE_LIGHT);
+    }
+    settings.remove(SER_STAGEPICOPACITY_OLD);
+    settings.remove(SER_STAGESEED_OLD);
+    settings.remove(SER_STAGEFROM_OLD);
+    settings.remove(SER_STAGETO_OLD);
     settings.setValue(SER_STAGEOPACITY, stageOpacity);
     settings.setValue(SER_STENABLED, streamTweakEnabled);
     settings.setValue(SER_HELDASLEEP, heldAsleep);
@@ -204,6 +229,7 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->hasCustomName == that.hasCustomName &&
            this->uuid == that.uuid &&
            this->macAddress == that.macAddress &&
+           this->wakeMacAddress == that.wakeMacAddress &&
            this->localAddress == that.localAddress &&
            this->remoteAddress == that.remoteAddress &&
            this->ipv6Address == that.ipv6Address &&
@@ -214,9 +240,8 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->aliasSuffix == that.aliasSuffix &&
            this->isAddressPinned == that.isAddressPinned &&
            this->stageImagePath == that.stageImagePath &&
-           this->stageSeedColor == that.stageSeedColor &&
-           this->stageColorFrom == that.stageColorFrom &&
-           this->stageColorTo == that.stageColorTo &&
+           this->stageImagePathLight == that.stageImagePathLight &&
+           this->stageImageLightSet == that.stageImageLightSet &&
            this->stageOpacity == that.stageOpacity &&
            this->streamTweakEnabled == that.streamTweakEnabled &&
            this->heldAsleep == that.heldAsleep &&
@@ -278,6 +303,9 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     bool validLink = false;
     const auto hostLink = NvHTTP::getXmlString(serverInfo, "PyroWaveHostLinkMbps").toUInt(&validLink);
     this->pyrowaveHostLinkMbps = validLink && hostLink <= 400000 ? hostLink : 0;
+    // PyroWave Test (7.0.0): Vibeshine/Vibepollo 2.0.1 announce their paired UDP probe here.
+    this->pyrowaveTestable = NvHTTP::getXmlString(serverInfo, "PyroWaveUdpProbeVersion") == "1" &&
+                             NvHTTP::getXmlString(serverInfo, "PyroWaveUdpProbeBurstVersion") == "1";
 
     QString maxLumaPixelsHEVC = NvHTTP::getXmlString(serverInfo, "MaxLumaPixelsHEVC");
     if (!maxLumaPixelsHEVC.isEmpty()) {
@@ -362,7 +390,9 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
 
 bool NvComputer::wake() const
 {
-    QByteArray wolPayload;
+    // One payload per MAC: the one the host reports and, since 8.1.0, the one the user added
+    // for another card of the same PC (wakeMacAddress, issue #45). Both are sent everywhere.
+    QList<QByteArray> wolPayloads;
 
     {
         QReadLocker readLocker(&lock);
@@ -372,17 +402,30 @@ bool NvComputer::wake() const
             return true;
         }
 
-        if (macAddress.isEmpty()) {
+        QList<QByteArray> macs;
+        if (!macAddress.isEmpty()) {
+            macs.append(macAddress);
+        }
+        if (!wakeMacAddress.isEmpty() && wakeMacAddress != macAddress) {
+            macs.append(wakeMacAddress);
+        }
+
+        if (macs.isEmpty()) {
             qWarning() << name << "has no MAC address stored";
             return false;
         }
 
-        // Create the WoL payload
-        wolPayload.append(QByteArray::fromHex("FFFFFFFFFFFF"));
-        for (int i = 0; i < 16; i++) {
-            wolPayload.append(macAddress);
+        // Create the WoL payloads
+        for (const QByteArray& mac : std::as_const(macs)) {
+            QByteArray wolPayload;
+            wolPayload.append(QByteArray::fromHex("FFFFFFFFFFFF"));
+            for (int i = 0; i < 16; i++) {
+                wolPayload.append(mac);
+            }
+            Q_ASSERT(wolPayload.size() == 102);
+            wolPayloads.append(wolPayload);
+            qInfo().noquote() << "WoL for" << name << "to" << QString(mac.toHex(':'));
         }
-        Q_ASSERT(wolPayload.size() == 102);
     }
 
     // Ports used as-is
@@ -463,12 +506,14 @@ bool NvComputer::wake() const
 
             // Send to all static ports
             for (quint16 port : STATIC_WOL_PORTS) {
-                if (sock.writeDatagram(wolPayload, address, port)) {
-                    qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
-                    success = true;
-                }
-                else {
-                    qWarning() << "Send failed:" << sock.error();
+                for (const QByteArray& wolPayload : std::as_const(wolPayloads)) {
+                    if (sock.writeDatagram(wolPayload, address, port)) {
+                        qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
+                        success = true;
+                    }
+                    else {
+                        qWarning() << "Send failed:" << sock.error();
+                    }
                 }
             }
 
@@ -487,12 +532,14 @@ bool NvComputer::wake() const
                 for (quint16 port : DYNAMIC_WOL_PORTS) {
                     port = (port - 47989) + basePort;
 
-                    if (sock.writeDatagram(wolPayload, address, port)) {
-                        qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
-                        success = true;
-                    }
-                    else {
-                        qWarning() << "Send failed:" << sock.error();
+                    for (const QByteArray& wolPayload : std::as_const(wolPayloads)) {
+                        if (sock.writeDatagram(wolPayload, address, port)) {
+                            qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
+                            success = true;
+                        }
+                        else {
+                            qWarning() << "Send failed:" << sock.error();
+                        }
                     }
                 }
             }
@@ -749,6 +796,7 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(pairState);
     ASSIGN_IF_CHANGED(serverCodecModeSupport);
     ASSIGN_IF_CHANGED(pyrowaveHostLinkMbps);
+    ASSIGN_IF_CHANGED(pyrowaveTestable);
     ASSIGN_IF_CHANGED(currentGameId);
     ASSIGN_IF_CHANGED(activeAddress);
     ASSIGN_IF_CHANGED(state);

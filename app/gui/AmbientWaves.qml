@@ -59,9 +59,24 @@ Item {
      */
     property real rise: 1.0
 
+    /**
+     * Held where they are (8.6.0): the update screen stops them when it hands over to
+     * StreamLightUpdater.exe, which redraws them at `flowTime` — the same frame, from another
+     * program — so nothing moves at the moment one window replaces the other.
+     */
+    property bool frozen: false
+    readonly property real flowTime: _t
+
     readonly property int _layers: 5
     // Designed at 1280 wide, like everything else, and grown with the window.
     readonly property real _u: Theme.uiScale
+
+    // 7.0.0: the waves are lines and thin washes on the floor, so they take the ink — in Light
+    // a pale accent drawn at 2% would not show at all. Same strength in both themes since the
+    // light floor stopped being near-white (08/10/2026): ×1.3 on grey-blue made them shout.
+    property bool dark: false
+    readonly property color _ink: dark ? Theme.accent : Theme.ink
+    readonly property real  _k: 1.0
 
     clip: true
 
@@ -108,7 +123,7 @@ Item {
      */
     FrameAnimation {
         running: waves.visible && !Theme.reduceAnimations && !waves._dialogInFront
-                 && !WindowMove.moving
+                 && !WindowMove.moving && !waves.frozen
                  && Qt.application.state === Qt.ApplicationActive
         // Clamped: the first frame after a pause reports the whole time it was away, and
         // every layer would leap.
@@ -185,12 +200,12 @@ Item {
             ShapePath {
                 strokeWidth: -1
                 strokeColor: "transparent"
-                fillColor: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, wave.fillAlpha)
+                fillColor: Qt.rgba(waves._ink.r, waves._ink.g, waves._ink.b, wave.fillAlpha * waves._k)
                 PathPolyline { path: wave.body }
             }
             ShapePath {
                 strokeWidth: Math.max(1, 1.5 * waves._u)
-                strokeColor: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, wave.crestAlpha)
+                strokeColor: Qt.rgba(waves._ink.r, waves._ink.g, waves._ink.b, wave.crestAlpha * waves._k)
                 fillColor: "transparent"
                 joinStyle: ShapePath.RoundJoin
                 PathPolyline { path: wave.crest }

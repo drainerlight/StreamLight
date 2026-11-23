@@ -11,6 +11,10 @@ import ShortcutManager 1.0
 Popup {
     id: pop
 
+    // 7.0.0: the shared spring in and quick out (PopEnter/PopExit), off with Reduce animations.
+    enter: PopEnter {}
+    exit: PopExit {}
+
     property int action: -1
     property string actionName: ""
 
@@ -29,6 +33,10 @@ Popup {
     modal: true
     Overlay.modal: Item {}
     focus: true
+    // Placed in the window, not in whatever opened it (7.0.0): x and y are worked out on the
+    // overlay, and a popup positions itself in its PARENT's coordinates — opened from inside
+    // a dialog, it landed off to the right by the dialog's own offset.
+    parent: Overlay.overlay
     x: (Overlay.overlay ? (Overlay.overlay.width  - width)  / 2 : 0)
     y: (Overlay.overlay ? Math.max(40, Overlay.overlay.height * 0.10) : 40)
     closePolicy: Popup.CloseOnEscape
@@ -41,7 +49,7 @@ Popup {
     padding: _px(32)
 
     background: Rectangle {
-        color: Theme.card; border.color: Theme.line; border.width: 1; radius: pop._px(12)
+        color: Theme.card; border.color: Theme.lineHigh; border.width: 1; radius: pop._px(12)
     }
 
     contentItem: ColumnLayout {
@@ -102,11 +110,15 @@ Popup {
 
                     background: Rectangle {
                         radius: pop._px(8)
-                        color: chip._sel ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16) : Theme.card
-                        border.color: chip.activeFocus ? Theme.accent
-                                    : chip._sel        ? Qt.darker(Theme.accent, 1.55)
-                                    :                     Theme.line
-                        border.width: (chip.activeFocus || chip._sel) ? 2 : 1
+                        // Glass (05/11/2026, variant A of docs/mockups/pulsanti): chosen = the wash
+                        // tinted by the accent under a 55% hairline, focus = 22% + 2 px accent.
+                        color: chip.activeFocus ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.22)
+                             : chip._sel        ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.18)
+                             :                    Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
+                        border.color: chip.activeFocus ? Theme.accentFill
+                                    : chip._sel        ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.55)
+                                    :                     Theme.lineHigh
+                        border.width: chip.activeFocus ? 2 : 1
                     }
                     contentItem: Item {
                         // Center the glyph (+ optional caption) block vertically so
@@ -127,7 +139,7 @@ Popup {
                                 visible: !["A","B","X","Y"].includes(modelData.key)
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 text: modelData.label
-                                color: chip._sel ? Theme.accent : Theme.text2
+                                color: chip._sel ? Theme.inkText : Theme.text2
                                 font.family: Theme.family; font.pixelSize: pop._px(Theme.fontCaption)
                             }
                         }

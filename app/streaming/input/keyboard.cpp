@@ -31,11 +31,16 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected quit key combo");
 
-        // Push a quit event to the main loop
-        SDL_Event event;
-        event.type = SDL_QUIT;
-        event.quit.timestamp = SDL_GetTicks();
-        SDL_PushEvent(&event);
+        // Ends the stream and closes the app on the host
+        Session::get()->requestEnd(true);
+        break;
+
+    case KeyComboPause:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Detected pause key combo");
+
+        // Ends the stream and leaves the app running on the host, to be resumed
+        Session::get()->requestEnd(false);
         break;
 
     case KeyComboUngrabInput:
@@ -64,7 +69,7 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected stats toggle combo");
 
-        // Cycle the stats overlay: Off -> Minimal -> Default -> Full -> Off ...
+        // Show or hide the stats overlay (what it shows is chosen in Settings > Overlay)
         Session::get()->togglePerfOverlay();
         break;
 
@@ -153,8 +158,13 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected stream settings combo");
         // Open the live Stream Settings overlay (input captured while open).
+        // Its prompts are for the first pad connected, if any: it is driven with one either way.
         if (m_StreamSettings != nullptr && !m_StreamSettings->isActive()) {
-            m_StreamSettings->open();
+            SDL_GameController* pad = nullptr;
+            for (int i = 0; i < MAX_GAMEPADS && pad == nullptr; i++) {
+                pad = m_GamepadState[i].controller;
+            }
+            m_StreamSettings->open(pad);
         }
         break;
 

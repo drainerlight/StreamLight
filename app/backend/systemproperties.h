@@ -93,6 +93,14 @@ public:
      */
     Q_INVOKABLE QVariantMap vrrRecommendation();
 
+    /**
+     * The changelog of the major release this build belongs to (7.0.0): every entry from X.0.0
+     * up to the running version, newest first, parsed from the changelog.txt embedded in the
+     * resources. Each entry is { version, name, date, intro, sections: [{ title, items:
+     * [{ lead, text }] }] } — a bullet's lead is the part before its em dash. About shows it.
+     */
+    Q_INVOKABLE QVariantList changelogForCurrentMajor() const;
+
     Q_INVOKABLE void startAsyncLoad();
     Q_INVOKABLE void waitForAsyncLoad();
     Q_INVOKABLE void refreshDisplays();
@@ -104,9 +112,9 @@ public:
 
     // Powers off THIS (client) PC. Used by the Power dialog's "Client" / "Both"
     // targets. Windows-only; a no-op on other platforms.
-    // installUpdates: install pending Windows updates before powering off
-    // ("Update and shut down", via InitiateShutdown + SHUTDOWN_INSTALL_UPDATES).
-    Q_INVOKABLE void shutdownClient(bool installUpdates = false);
+    // ⚠️ No "install updates" since 8.8.4: SHUTDOWN_INSTALL_UPDATES never installed the updates
+    // updatesPending() reports (installed, waiting for a restart) — §120. Restart finishes them.
+    Q_INVOKABLE void shutdownClient();
 
     /*
      * THIS device's power modes (6.2.0), read from the running system — never from what the
@@ -119,7 +127,7 @@ public:
      */
     Q_INVOKABLE QStringList clientPowerModes();
 
-    // Carries out one of clientPowerModes(). installUpdates applies to restart and shutdown.
+    // Carries out one of clientPowerModes(). installUpdates applies to restart only (8.8.4).
     Q_INVOKABLE void powerClient(const QString& mode, bool installUpdates = false);
 
     // This machine's name, as the Power dialog labels the "This device" row.

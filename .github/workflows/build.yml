@@ -43,6 +43,6 @@ jobs:
 
   build-windows:
     needs: setup
-    uses: ./.github/workflows/build-windows.yml
+    uses: ./.github/workflows/build-windows-release.yml
     with:
       ci_version: ${{ needs.setup.outputs.ci_version }}

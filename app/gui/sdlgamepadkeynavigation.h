@@ -1,8 +1,13 @@
 #pragma once
 
 #include <QTimer>
+#include <QVariantList>
 #include <QEvent>
 #include <QPoint>
+#include <QElapsedTimer>
+#include <QHash>
+
+class QKeyEvent;
 
 #include "SDL_compat.h"
 
@@ -14,7 +19,7 @@ class SdlGamepadKeyNavigation : public QObject
 
     // Exposes the detected controller family so QML can render the correct
     // button glyphs (Xbox vs PlayStation vs generic).
-    // Values: "xbox", "ps", "switch", "generic", "none".
+    // Values: "xbox", "ps", "switch", "steam", "generic", "none".
     Q_PROPERTY(QString controllerType READ controllerType NOTIFY controllerTypeChanged)
 
     // Tracks the last-used input device so QML can suppress mouse hover when
@@ -22,6 +27,25 @@ class SdlGamepadKeyNavigation : public QObject
     // Values: "pointer" (mouse), "key" (gamepad or keyboard). With Button prompts = Controller
     // it stays "key": the mouse still points and clicks, but never switches the mode (#24).
     Q_PROPERTY(QString inputMode READ inputMode NOTIFY inputModeChanged)
+    // 7.0.0: the right stick's scrolling speed in px/s, positive = down, 0 at rest. A speed and
+    // not a step: PadScroll.qml moves the view by it on every frame (see the note in the poll).
+    Q_PROPERTY(qreal scrollVelocity READ scrollVelocity NOTIFY scrollVelocityChanged)
+    // 8.0.0: the same speed for the stick's horizontal axis, positive = right — for the few
+    // views that scroll sideways (the profile strip of Host profiles, #42).
+    Q_PROPERTY(qreal scrollVelocityX READ scrollVelocityX NOTIFY scrollVelocityXChanged)
+    // 7.0.0: some view would move under the right stick right now (a PadScroll with room to
+    // scroll holds the focus) — the status bar draws its "Scroll" prompt from this.
+    Q_PROPERTY(bool scrollAvailable READ scrollAvailable NOTIFY scrollAvailableChanged)
+    // 8.0.0: Steam's Desktop Layout has been seen sending the pad as keyboard too (the same thing
+    // steamDesktopLayoutDetected says once). Its copy of A can arrive first, as a real Return,
+    // and the on-screen keyboard reads A from the scan code: with this set it opens on that
+    // Return as well (VirtualKeyboard.offer()).
+    Q_PROPERTY(bool desktopLayoutEchoes READ desktopLayoutEchoes NOTIFY desktopLayoutEchoesChanged)
+    // 8.7.0: the charge of the pads without a cable, for the top-right corner (StatusCluster.qml).
+    // One map per pad, in the order they were opened: brand ("xbox", "ps", "switch", "steam",
+    // "generic"), level (1 Critical … 4 Full, 0 not known), charging, critical (≤ 10 %). Levels
+    // and not a percentage: a pad on the Xbox Wireless Adapter only knows four.
+    Q_PROPERTY(QVariantList padBatteries READ padBatteries NOTIFY padBatteriesChanged)
 
 public:
     SdlGamepadKeyNavigation(StreamingPreferences* prefs);
@@ -43,13 +67,26 @@ public:
     // "Back" produces the same effect as the matching gamepad button.
     Q_INVOKABLE void simulateKey(int qtKey);
 
+    /** A view really moved for scrollVelocity: the next navigation step re-focuses (7.0.0). */
+    Q_INVOKABLE void noteScrolled() { m_ScrolledAway = true; }
+
+    /** A PadScroll says whether its view could scroll now (7.0.0). Forgotten when it goes. */
+    Q_INVOKABLE void setScrollAvailable(QObject* view, bool available);
+    bool scrollAvailable() const { return !m_ScrollViews.isEmpty(); }
+
     // Re-emit controllerTypeChanged so the UI re-resolves glyphs after the user
     // changes the glyph-set preference in Settings.
     Q_INVOKABLE void refreshGlyphPreference() { emit controllerTypeChanged(); }
 
     QString controllerType() const;
 
+    QVariantList padBatteries() const { return m_PadBatteries; }
+
     QString inputMode() const { return m_InputMode; }
+
+    qreal scrollVelocity() const { return m_ScrollVelocity; }
+    qreal scrollVelocityX() const { return m_ScrollVelocityX; }
+    bool desktopLayoutEchoes() const { return m_DesktopLayoutReported; }
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -57,18 +94,61 @@ protected:
 signals:
     void controllerTypeChanged();
     void inputModeChanged();
+    // 6.5.1 (#24): Steam's Desktop Layout is sending the pad as keyboard too — seen from the
+    // echoes below, once per launch. menuHoldSwitches: the pad is the Steam Controller
+    // (28de:1304), whose Desktop Layout switches to Gamepad on a long press of Menu.
+    void steamDesktopLayoutDetected(bool menuHoldSwitches);
+    void desktopLayoutEchoesChanged();
+    void padBatteriesChanged();
+
+    // 7.0.0 — the right stick scrolls. The view that holds the focus moves by scrollVelocity
+    // (PadScroll.qml) and calls noteScrolled(); the next D-pad or left-stick step then only
+    // brings the focused element back into view (refocusRequested) instead of moving the focus.
+    void scrollVelocityChanged();
+    void scrollVelocityXChanged();
+    void scrollAvailableChanged();
+    void refocusRequested();
 
 private:
-    void sendKey(QEvent::Type type, Qt::Key key, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
+    void sendKey(QEvent::Type type, Qt::Key key, Qt::KeyboardModifiers modifiers = Qt::NoModifier,
+                 bool autoRepeat = false);
+
+    // One D-pad direction as the key it stands for (Tab / Shift+Tab in UI nav mode).
+    void sendDpad(int sdlButton, QEvent::Type type, bool autoRepeat = false);
 
     void updateTimerState();
 
+    void setScrollVelocity(qreal pxPerSecond);
+    void setScrollVelocityX(qreal pxPerSecond);
+
     void updateControllerType();
+
+    // "xbox", "ps", "switch", "steam" or "generic" — the glyphs' family and the corner's logo.
+    static QString familyOf(SDL_GameController* gc);
+
+    // 8.7.0: rebuilds padBatteries from the open pads; emits only when something moved.
+    void refreshPadBatteries();
 
     void setInputMode(const QString& mode);
 
     // Button prompts = Controller: mouse movement and clicks leave inputMode on "key" (#24).
     bool padNavigationPinned() const;
+
+    // Steam Input echoes (#24). With Steam open on the client, its Desktop Layout sends a
+    // controller's D-pad and face buttons as keyboard keys too, while SDL reads the same
+    // controller directly — so every press arrived twice and the focus moved by two. A pad
+    // press and a keyboard key meaning the same thing within a short window are one press:
+    // whichever arrives first acts, the other is dropped (and its release with it).
+    enum NavButton { NB_UP, NB_DOWN, NB_LEFT, NB_RIGHT, NB_ACCEPT, NB_BACK, NB_COUNT };
+    static int navButtonForKey(int qtKey);
+    static int navButtonForPad(int sdlButton);
+    // Pad side: true = this press echoes a key already delivered, drop it.
+    bool padPressIsEcho(int nav);
+    // Keyboard side, from the event filter: true = swallow the event.
+    bool keyEventIsEcho(QKeyEvent* ke);
+    // Counts one matched pair; the third one reports the Desktop Layout.
+    void noteInputEcho();
+    bool steamControllerConnected() const;
 
 private slots:
     void onPollingTimerFired();
@@ -76,6 +156,11 @@ private slots:
 private:
     StreamingPreferences* m_Prefs;
     QTimer* m_PollingTimer;
+    // 8.7.0: re-reads the pads' charge every 30 s — the poll stops with the window's focus, and
+    // not every backend sends a battery event.
+    QTimer* m_BatteryTimer;
+    QVariantList m_PadBatteries;
+    int m_PadBatteryRetries = 0;
     QList<SDL_GameController*> m_Gamepads;
     bool m_Enabled;
     bool m_UiNavMode;
@@ -84,10 +169,37 @@ private:
     Uint32 m_LastAxisNavigationEventTime;
     // Triggers are edge-detected, not fed through the stick repeat timer above:
     // pulling LT/RT is one discrete "previous/next host", not a direction you hold.
+    bool m_ScrolledAway = false;
+    qreal m_ScrollVelocity = 0;
+    qreal m_ScrollVelocityX = 0;
+    QHash<QObject*, QMetaObject::Connection> m_ScrollViews;
+    // 7.0.0: the D-pad direction held down (an SDL button, -1 = none), when it went down and
+    // when it last repeated. SDL sends one event per press, so a held D-pad used to move one
+    // step and stop: a slider could not be swept, a list not run through.
+    int m_HeldDpad = -1;
+    Uint32 m_HeldDpadSince = 0;
+    Uint32 m_LastDpadRepeat = 0;
     bool m_LeftTriggerDown;
     bool m_RightTriggerDown;
     QString m_ControllerType;
     QString m_InputMode;
     QPoint m_LastMousePos;
     bool m_HasLastMousePos;
+
+    // Echo matching (#24). Times on m_NavClock, -1 = nothing waiting. Each press cancels at
+    // most one press from the other side, so fast tapping with both sources stays 1:1.
+    QElapsedTimer m_NavClock;
+    qint64 m_PadNavAt[NB_COUNT];
+    qint64 m_KeyNavAt[NB_COUNT];
+    bool m_PadNavDropped[NB_COUNT];
+    // The decision taken for the current press of each keyboard key. A real key reaches the
+    // filter first as ShortcutOverride and then as KeyPress (same timestamp): both must get
+    // the same answer, and its auto-repeats and release follow it.
+    struct KeyDecision {
+        quint64 timestamp;
+        bool echo;
+    };
+    QHash<int, KeyDecision> m_KeyDecisions;
+    int m_EchoCount;
+    bool m_DesktopLayoutReported;
 };

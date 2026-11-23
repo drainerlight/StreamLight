@@ -11,6 +11,10 @@ import Theme 1.0
 Popup {
     id: dlg
 
+    // 7.0.0: the shared spring in and quick out (PopEnter/PopExit), off with Reduce animations.
+    enter: PopEnter {}
+    exit: PopExit {}
+
     property string latestVersion: ""
 
     signal accepted(bool dontRemind)
@@ -99,14 +103,21 @@ Popup {
                 implicitHeight: dlg._px(20)
                 radius: dlg._px(4)
                 y: dontRemindCheck.height / 2 - height / 2
-                color: dontRemindCheck.checked ? Theme.accent : "transparent"
-                border.color: (dontRemindCheck.activeFocus || dontRemindCheck.checked) ? Theme.accent : Theme.lineHigh
+                // Glass (05/11/2026, variant A of docs/mockups/pulsanti): ticked = the wash
+                // tinted by the accent under its hairline, the tick in the accent's text colour;
+                // focus = 2 px accent. It was a solid accent square with a dark tick.
+                color: dontRemindCheck.checked
+                       ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.22)
+                       : Qt.rgba(Theme.tintBase.r, Theme.tintBase.g, Theme.tintBase.b, 0.08)
+                border.color: dontRemindCheck.activeFocus ? Theme.accentFill
+                            : dontRemindCheck.checked     ? Qt.rgba(Theme.accentFill.r, Theme.accentFill.g, Theme.accentFill.b, 0.55)
+                            :                               Theme.lineHigh
                 border.width: dontRemindCheck.activeFocus ? 2 : 1
                 Label {
                     anchors.centerIn: parent
                     visible: dontRemindCheck.checked
                     text: "✓"
-                    color: Theme.ground
+                    color: Theme.inkText
                     font.pixelSize: dlg._px(Theme.fontSmall)
                     font.bold: true
                 }

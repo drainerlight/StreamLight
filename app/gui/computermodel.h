@@ -1,8 +1,10 @@
 #include "backend/computermanager.h"
 #include "streaming/session.h"
 #include "../StreamTweakBridge.h"
+#include "backend/boxartmanager.h"
 
 #include <QAbstractListModel>
+#include <QTimer>
 #include <QHash>
 #include <QVariantMap>
 
@@ -54,13 +56,12 @@ class ComputerModel : public QAbstractListModel
         ProfileCountRole,
         ActiveProfileSlotRole,
         ActiveProfileNameRole,
-        StageColorFromRole,
-        StageColorToRole,
         StageImageRole,
-        StageSeedRole,
         StageOpacityRole,
         StreamTweakEnabledRole,
-        AsleepRole          // put to sleep by this client, not polled until Wake (6.2.0)
+        AsleepRole,         // put to sleep by this client, not polled until Wake (6.2.0)
+        PyroWaveTestRole,   // 0 no PyroWave · 1 PyroWave, host too old for the test · 2 testable (7.0.0)
+        ServerRestartRole   // the streaming server's name while a Library Sync and restart restarts it, else "" (8.0.0)
     };
 
 public:
@@ -105,8 +106,7 @@ public:
 
     // Asks the host (via StreamTweak) to power off. Requires the host to have
     // approved this client; fire-and-forget over the authenticated bridge.
-    // installUpdates: install pending Windows updates before powering off.
-    Q_INVOKABLE void shutdownHost(int computerIndex, bool installUpdates = false);
+    Q_INVOKABLE void shutdownHost(int computerIndex);
 
     /**
      * Host power modes (StreamTweak 8.6.0+). requestPowerCaps answers with
@@ -139,6 +139,19 @@ public:
      * the host keeps it out of its history and skips its session-start side effects.
      */
     Q_INVOKABLE void requestLockState(int computerIndex);
+
+    /*
+     * 7.0.2: after a Quit session, wait for the host to close the game, then ask StreamTweak
+     * (GAMEALIVE, 9.2.3+) whether the game it launched is still running. The streaming server
+     * can say the app has ended while the game lives on — Vibeshine cannot terminate an Xbox
+     * app game it started through explorer.exe, and its serverinfo then shows nothing — so this
+     * is the only question that sees it. Emits gameStillRunningAfterQuit only on a clear yes;
+     * an older host, the integration off, or "known":false say nothing. By uuid, never by row:
+     * the answer comes seconds later (§80.2).
+     * 8.2.0: a yes is asked again until 32 s after the Quit, and only a yes at the end is said —
+     * a game can take longer than 8 s to go (§98.5).
+     */
+    Q_INVOKABLE void checkGameAfterQuit(const QString& hostUuid, const QString& appName);
     Q_INVOKABLE void markUnlockSession(int computerIndex, bool begin);
 
     /**
@@ -195,15 +208,9 @@ public:
      */
     Q_INVOKABLE void refreshTailscale(int computerIndex);
 
-    /**
-     * Sets this host's stage backdrop. Pass a picture path, OR a "#rrggbb" seed, OR neither
-     * to clear it and fall back to the colours derived from the host name.
-     *
-     * The gradient pair is worked out once, here, and stored on the host — not recomputed
-     * when the stage is drawn, which happens every time the user changes tab.
-     */
-    Q_INVOKABLE void setHostStageBackground(int computerIndex, const QString& imagePath,
-                                            const QString& seedColor);
+    /** Sets this host's stage picture (7.0.0: a picture only); an empty path clears it. */
+    Q_INVOKABLE void setHostStageBackground(int computerIndex, const QString& imagePath);
+
 
     /**
      * How opaque this host's card is on Home, in percent (6.0.0). Clamped to
@@ -211,6 +218,37 @@ public:
      * Stored on the host with the rest of its backdrop.
      */
     Q_INVOKABLE void setHostStageOpacity(int computerIndex, int percent);
+
+    /**
+     * Wake-on-LAN (8.1.0, issue #45): { reported, extra } as "AA:BB:CC:DD:EE:FF" strings, empty
+     * when unknown / not set. "reported" is the MAC /serverinfo gave — the card the host
+     * streams on — and "extra" one the user added for another card of the same PC.
+     */
+    Q_INVOKABLE QVariantMap hostWakeMacs(int computerIndex) const;
+    /**
+     * Sets the extra MAC from what the user typed: twelve hex digits, with or without ':' '-'
+     * or '.' between them; empty clears it. False (and nothing stored) when it is not a MAC,
+     * or is all zeros or a multicast address, which no card has.
+     */
+    Q_INVOKABLE bool setHostWakeMac(int computerIndex, const QString& text);
+
+    /**
+     * The Power popup's last confirmed choice on this host (8.5.1, issue #51): { host, client }
+     * as PowerDialog's mode keys, empty when none. By uuid, like everything the popup keeps
+     * past one call (§80.2). The popup checks each mode against what the machine offers now.
+     */
+    Q_INVOKABLE QVariantMap hostPowerChoice(const QString& hostUuid) const;
+    Q_INVOKABLE void setHostPowerChoice(const QString& hostUuid, const QString& hostMode,
+                                        const QString& clientMode);
+
+    /**
+     * The last three pictures chosen as a host background, newest first, for any host
+     * (7.0.0) — the Background panel offers them so a pad can pick a picture without the
+     * file dialog. Files that no longer exist are dropped on read.
+     */
+    Q_INVOKABLE QStringList recentStagePictures() const;
+    /** Puts @p imagePath at the head of recentStagePictures() (max 3). */
+    Q_INVOKABLE void rememberStagePicture(const QString& imagePath);
 
     /**
      * The StreamTweak integration, per host. Everything that talks to the bridge is gated
@@ -259,6 +297,37 @@ public:
     /// Options tile.
     Q_INVOKABLE void restoreHostLink(int computerIndex);
 
+    /**
+     * StreamLight 8.0's host section (StreamTweak 10.0.0) — HostSectionScreen.qml.
+     *
+     * requestHostSection asks one read: "DASHBOARD", "APPS", "NVIDIA", "STATS" for the
+     * Dashboard's numbers, or "UPDATESTATE" for updates waiting for a restart — or one of the
+     * Sessions tab's, in their fixed shapes: "SESSIONS <offset> <count> ALL|MINE",
+     * "SESSION <id>", "SERIES <id> <track>", "COVER <id> <n>". The signal carries the command
+     * as sent. Emits hostSectionReceived with the parsed JSON, an EMPTY map when
+     * the host did not answer or predates the verb.
+     *
+     * setHostSetting sends one write. Only the three shapes the host accepts get through —
+     * "SETAUDIO ON|OFF", "SETAPP <16 hex digits> ON|OFF", "SETSENTINEL ON|OFF" — so nothing
+     * from QML can put a path or a free command on the wire. Emits hostSettingResult with the
+     * host's reply ("" on timeout, "ERR" when refused here).
+     */
+    Q_INVOKABLE void requestHostSection(int computerIndex, const QString& verb);
+    Q_INVOKABLE void setHostSetting(int computerIndex, const QString& command);
+
+    /**
+     * The Hue Sync tab (8.4.0). Hue Sync on THIS device: whether it is installed and open, and
+     * "take the lights back" — restart it, which makes it sync again (hueTakeBackDone tells how
+     * it went). The automatic take-back is stored per host, since it is that host's StreamTweak
+     * (10.1.0) that says who holds the bridge; see watchHueLights().
+     */
+    Q_INVOKABLE bool hueClientInstalled() const;
+    Q_INVOKABLE bool hueClientRunning() const;
+    Q_INVOKABLE QString thisDeviceName() const;
+    Q_INVOKABLE void hueTakeBack();
+    Q_INVOKABLE bool hueAutoTakeBack(int computerIndex) const;
+    Q_INVOKABLE void setHueAutoTakeBack(int computerIndex, bool on);
+
     /** True if Tailscale is installed on THIS (client) PC (so the host's Tailscale
      *  endpoint is actually usable from here). Drives the greyed "Tailscale" option. */
     Q_INVOKABLE bool clientHasTailscale() const;
@@ -282,16 +351,23 @@ public:
     Q_INVOKABLE QString hostProfileName(int computerIndex, int slot) const;
     Q_INVOKABLE void setHostProfileName(int computerIndex, int slot, const QString& name);
     Q_INVOKABLE QVariantMap hostProfileSettings(int computerIndex, int slot) const;
-    // What a profile row set to "Global" will actually run at. A profile sits directly on
-    // top of the global settings, so unlike the per-game dialog there is no middle level
-    // to fold in. Formatted for display; see inheritedValueLabels() in settings/appsettings.h.
-    Q_INVOKABLE QVariantMap globalLabels() const;
+    // What a profile row set to "Global" will actually run at, keyed like an override map (8.8.0).
+    // A profile sits directly on the global settings: no middle level. See inheritedValues().
+    Q_INVOKABLE QVariantMap globalValues() const;
     Q_INVOKABLE void setHostProfileSettings(int computerIndex, int slot, const QVariantMap& ov);
     Q_INVOKABLE int addHostProfile(int computerIndex);                // new slot, or -1
     Q_INVOKABLE void removeHostProfile(int computerIndex, int slot);
+    // 8.8.0 (#53): reorder — the profile at `from` goes to `to` (Profiles, Custom order: R3, then ↑↓).
+    Q_INVOKABLE void moveHostProfile(int computerIndex, int from, int to);
+    // 8.8.0 (#53): the host's sort mode (HostProfileManager::SortMode: 0 A–Z, 1 Created, 2 Custom),
+    // the slots in that order, and each profile's creation number (a stable identity across moves).
+    Q_INVOKABLE int hostProfileSortMode(int computerIndex) const;
+    Q_INVOKABLE void setHostProfileSortMode(int computerIndex, int mode);
+    Q_INVOKABLE QVariantList hostProfileOrder(int computerIndex) const;
+    Q_INVOKABLE int hostProfileCreated(int computerIndex, int slot) const;
 
     // The active profile's override as a QVariantMap (keys: width/height/fps/
-    // bitrate/hdr/codec/framepacing/audio/hue). Empty when no profile is active.
+    // bitrate/hdr/codec/framepacing/audio/…). Empty when no profile is active.
     Q_INVOKABLE QVariantMap hostActiveOverride(int computerIndex) const;
 
     // ── Last played (5.7.0) ──────────────────────────────────────────────────────────────
@@ -322,6 +398,10 @@ public:
      * find what to resume.
      */
     Q_INVOKABLE QVariantMap runningAppFor(int computerIndex) const;
+    // The Library tab's cover for the host's app of that name (8.0.0): this client's own box
+    // art, the host page's picture, fetched from the server when it is not on disk yet ("" until
+    // then; libraryCoverReady says when to ask again). "" for a name the server does not list.
+    Q_INVOKABLE QString libraryCover(int computerIndex, const QString& name);
 
     /// "2 h ago", "yesterday", "3 days ago" — the wording the host used to send with its own
     /// last-session reply, kept identical now that the client works it out for itself.
@@ -354,9 +434,19 @@ signals:
     void powerHostResult(int computerIndex, QString mode, bool ok);
     /** supported=false means the host does not know LOCKSTATE — not that it is unlocked. */
     void lockStateReceived(int computerIndex, bool supported, bool locked);
+    void gameStillRunningAfterQuit(QString hostUuid, QString gameName);
     /** detail is the change being made ("2.5 Gbps → 1 Gbps"), empty once finished. */
     void linkMatchProgress(int computerIndex, bool running, QString detail);
     void updateProgressReceived(int computerIndex, QVariantMap state);
+
+    // StreamLight 8.0's host section.
+    void hostSectionReceived(int computerIndex, QString verb, QVariantMap data);
+    void hostSettingResult(int computerIndex, QString command, QString reply);
+    void libraryCoverReady(int computerIndex);
+    void hueTakeBackDone(bool ok);
+    // From the CAPS reply that starts every authorisation check: whether the host has the
+    // host-section verbs ("host=1", StreamTweak 10.0.0) and its version ("ver=", "" before it).
+    void streamTweakCapsReceived(int computerIndex, bool hostSection, QString version);
 
     void layoutRevisionChanged();
 
@@ -366,11 +456,31 @@ private slots:
     void handlePairingCompleted(NvComputer* computer, QString error);
 
 private:
+    BoxArtManager m_BoxArtManager;      // the Library tab's covers (libraryCover)
     static void rememberStreamTweakSeen(const QString& uuid);
     void bumpLayoutRevision();
+    // One GAMEALIVE of checkGameAfterQuit(); asks again while the game is still closing (8.2.0).
+    void askGameAliveAfterQuit(const QString& hostUuid, const QString& appName, int attempt);
+
+    // A Library Sync and restart in progress on a host (8.0.0), followed from here and not
+    // from the section, so Home keeps saying "Restarting" after the section is left: for the
+    // minute the server is down, Moonlight's polls see the host offline. Keyed by uuid.
+    struct LibraryJob { QString server; QString phase; qint64 sinceMs = 0; };
+    QHash<QString, LibraryJob> m_LibraryJobs;
+    QTimer m_LibraryJobTimer;
+    void noteLibraryState(const QString& uuid, const QVariantMap& state);
+    void pollLibraryJobs();
+
+    // Hue Sync (8.4.0): the automatic take-back's check, and when Hue Sync was last restarted.
+    QTimer m_HueWatchTimer;
+    qint64 m_HueTakenBackMs = 0;
+    void watchHueLights();
 
     QVector<NvComputer*> m_Computers;
     int m_LayoutRevision = 0;
+    // The theme the stage pictures were last served for: each theme has its own (13/10/2026),
+    // so a theme change repaints every card.
+    bool m_StageLight = false;
     ComputerManager* m_ComputerManager;
     StreamTweakBridge m_streamTweakBridge;
     // Keyed by host UUID, not list index: the index shifts whenever the model is
@@ -381,4 +491,10 @@ private:
     // reused across re-polls while the host approval is pending; cleared once the
     // host approves/denies so a fresh attempt gets a new PIN.
     QHash<QString, QString> m_streamTweakPins;
+
+    // 8.8.3 (StreamTweak #17): ERR_UNAUTHORIZED on a signed command asks the access state again, but
+    // at most once per host every kReauthGapMs. See reauthAfterRejection().
+    void reauthAfterRejection(int computerIndex, const QString& uuid);
+    QHash<QString, qint64> m_reauthAt;   // uuid → when the access state was last asked again
+    static constexpr qint64 kReauthGapMs = 30000;
 };

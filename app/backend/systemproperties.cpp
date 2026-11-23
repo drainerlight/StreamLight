@@ -2,6 +2,7 @@
 #include "linkspeed.h"
 #include "singleinstance.h"
 #include "storereset.h"
+#include "tvlink.h"
 #include "utils.h"
 #include "streaming/vrrratepolicy.h"
 
@@ -12,6 +13,11 @@
 #include <QLibraryInfo>
 #include <QProcess>
 #include <QStringList>
+#include <QFile>
+#include <QRegularExpression>
+#include <QVersionNumber>
+
+#include <thread>
 
 #include "settings/videooptions.h"
 #include "streaming/session.h"
@@ -31,14 +37,14 @@
 #ifndef SHUTDOWN_FORCE_SELF
 #define SHUTDOWN_FORCE_SELF      0x00000002
 #endif
-#ifndef SHUTDOWN_POWEROFF
-#define SHUTDOWN_POWEROFF        0x00000008
-#endif
 #ifndef SHUTDOWN_INSTALL_UPDATES
 #define SHUTDOWN_INSTALL_UPDATES 0x00000040
 #endif
 #ifndef SHUTDOWN_RESTART
 #define SHUTDOWN_RESTART         0x00000004
+#endif
+#ifndef EWX_HYBRID_SHUTDOWN
+#define EWX_HYBRID_SHUTDOWN      0x00400000
 #endif
 #endif
 
@@ -490,11 +496,10 @@ void SystemProperties::restartApplication()
     QCoreApplication::quit();
 }
 
-void SystemProperties::shutdownClient(bool installUpdates)
+void SystemProperties::shutdownClient()
 {
 #ifdef Q_OS_WIN32
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SystemProperties: powering off client PC%s",
-                installUpdates ? " (installing pending updates first)" : "");
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SystemProperties: powering off client PC");
 
     // Enable SeShutdownPrivilege on our process token, then request a full power-off.
     HANDLE token = nullptr;
@@ -508,20 +513,31 @@ void SystemProperties::shutdownClient(bool installUpdates)
         CloseHandle(token);
     }
 
-    // "Update and shut down": InitiateShutdown is the only documented way to install
-    // pending updates before power-off (ExitWindowsEx does not). SHUTDOWN_FORCE_SELF
-    // guarantees our own session logs off; a planned reason avoids the unplanned-state
-    // file delay. Falls through to the plain power-off if it is refused.
-    if (installUpdates) {
-        DWORD rc = InitiateShutdownW(nullptr, nullptr, 0,
-                                     SHUTDOWN_INSTALL_UPDATES | SHUTDOWN_POWEROFF | SHUTDOWN_FORCE_SELF,
-                                     SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_FLAG_PLANNED);
-        if (rc == ERROR_SUCCESS) {
+    /*
+     * ⚠️ 8.8.4: no "Update and shut down" here any more. It was InitiateShutdown with
+     * SHUTDOWN_INSTALL_UPDATES, which installs only updates staged for a shut down — never the
+     * ones updatesPending() reports, installed and waiting for a RESTART: the SER9 shut down with it
+     * on 15 and 16/11/2026 and the update stayed until Windows forced a restart on 22/11 (§120).
+     * The Power dialog offers "Update & restart" instead.
+     *
+     * ⚠️ 8.5.0: with Fast Startup on, a Fast Startup shut down, as the Start menu's — until then
+     * this was always a full one, and the next boot a cold, slower one (05/11/2026). On means
+     * "Turn on fast startup" (HiberbootEnabled = 1) and a hibernation file to write the kernel to;
+     * either one missing, or the call refused, and it is the full shut down as before.
+     */
+    const QSettings power(QStringLiteral("HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power"),
+                          QSettings::NativeFormat);
+    SYSTEM_POWER_CAPABILITIES caps = {};
+    const bool fastStartup = power.value(QStringLiteral("HiberbootEnabled")).toInt() == 1
+                             && GetPwrCapabilities(&caps) && caps.HiberFilePresent;
+    if (fastStartup) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SystemProperties: a Fast Startup shut down");
+        if (ExitWindowsEx(EWX_SHUTDOWN | EWX_POWEROFF | EWX_HYBRID_SHUTDOWN, SHTDN_REASON_MAJOR_OTHER)) {
             return;
         }
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SystemProperties: InitiateShutdown(install updates) failed (rc %lu); plain power-off",
-                    rc);
+                    "SystemProperties: ExitWindowsEx(Fast Startup) failed (err %lu); a full shut down instead",
+                    GetLastError());
     }
 
     if (ExitWindowsEx(EWX_SHUTDOWN | EWX_POWEROFF, SHTDN_REASON_MAJOR_OTHER)) {
@@ -538,7 +554,6 @@ void SystemProperties::shutdownClient(bool installUpdates)
                                 + QStringLiteral("\\System32\\shutdown.exe");
     QProcess::startDetached(shutdownExe, { QStringLiteral("/s"), QStringLiteral("/t"), QStringLiteral("0") });
 #else
-    Q_UNUSED(installUpdates);
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "SystemProperties: shutdownClient is only supported on Windows");
 #endif
@@ -644,7 +659,8 @@ QString SystemProperties::clientName()
 void SystemProperties::powerClient(const QString& mode, bool installUpdates)
 {
     if (mode == QLatin1String("shutdown")) {
-        shutdownClient(installUpdates);
+        // installUpdates is never asked for with a shut down (8.8.4, see shutdownClient()).
+        shutdownClient();
         return;
     }
 
@@ -654,6 +670,8 @@ void SystemProperties::powerClient(const QString& mode, bool installUpdates)
     enableShutdownPrivilege();
 
     if (mode == QLatin1String("restart")) {
+        // The TV service (8.4.0) leaves the TV on through a restart it is told about.
+        TvLink::announceRestart();
         DWORD rc = InitiateShutdownW(nullptr, nullptr, 0,
                                      SHUTDOWN_RESTART | SHUTDOWN_FORCE_SELF
                                      | (installUpdates ? SHUTDOWN_INSTALL_UPDATES : 0),
@@ -688,13 +706,23 @@ void SystemProperties::powerClient(const QString& mode, bool installUpdates)
                 return;
         }
 
-        // Modern Standby (S0 low-power idle) has no suspend call: Windows enters it when the
-        // display goes off, so that is what we ask for. ⚠️ Not verifiable on the dev machine
-        // (it has S3) — this is the path the Ally takes, and it is to be confirmed there.
+        // Modern Standby (S0 low-power idle) has no suspend call: the display goes off and Windows
+        // enters standby behind it (Kernel-Power 506, reason "SC_MONITORPOWER").
+        // ⚠️ Not the Sleep key: 8.4.0 tried VK_SLEEP through SendInput, and on the SER9 it did
+        // nothing at all — "sent" twice in the log, no screen off in the service's (31/10/2026,
+        // 11:13:50 and 11:13:59). And not SetSuspendState: with no S1-S3 it may hibernate.
+        // The SER9 leaves this standby by itself on "Input Mouse" after 9-25 s, but so it does
+        // when the Start menu puts it to sleep: that is not this call (see the inputwatch tool
+        // in StreamLightService, docs/piano-streamlight-8.4.0-tv.md).
+        // ⚠️ From a thread of its own: the broadcast waits for every top-level window in turn,
+        // up to 2 s each, and on the SER9 it held the GUI for 30 s (03/11/2026) — the screen
+        // was off at once, but the navigation sounds kept the audio output open meanwhile.
         if (caps.AoAc) {
-            DWORD_PTR result = 0;
-            SendMessageTimeoutW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
-                                SMTO_ABORTIFHUNG, 2000, &result);
+            std::thread([]() {
+                DWORD_PTR result = 0;
+                SendMessageTimeoutW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2,
+                                    SMTO_ABORTIFHUNG, 2000, &result);
+            }).detach();
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "SystemProperties: Modern Standby, display turned off");
         }
         return;
@@ -727,4 +755,86 @@ bool SystemProperties::updatesPending()
 #else
     return false;
 #endif
+}
+
+QVariantList SystemProperties::changelogForCurrentMajor() const
+{
+    QVariantList out;
+    QFile f(QStringLiteral(":/changelog.txt"));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return out;
+    }
+    const QStringList lines = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'));
+
+    const QVersionNumber running = QVersionNumber::fromString(versionString);
+    // "Version 7.0.0 - Name (dd/mm/yyyy)" or "Version 7.0.0 (dd/mm/yyyy)"
+    static const QRegularExpression header(
+        QStringLiteral("^Version\\s+([0-9.]+)(?:\\s+-\\s+\"?(.*?)\"?)?\\s+\\(([^)]*)\\)\\s*$"));
+
+    QVariantMap entry;
+    QVariantList sections;
+    QVariantMap section;
+    QVariantList items;
+    bool keep = false;
+
+    auto flushSection = [&]() {
+        if (!section.isEmpty()) {
+            section[QStringLiteral("items")] = items;
+            sections.append(section);
+        }
+        section.clear();
+        items.clear();
+    };
+    auto flushEntry = [&]() {
+        flushSection();
+        if (keep && !entry.isEmpty()) {
+            entry[QStringLiteral("sections")] = sections;
+            out.append(entry);
+        }
+        entry.clear();
+        sections.clear();
+        keep = false;
+    };
+
+    for (QString line : lines) {
+        line = line.trimmed();
+        const QRegularExpressionMatch m = header.match(line);
+        if (m.hasMatch()) {
+            flushEntry();
+            const QVersionNumber v = QVersionNumber::fromString(m.captured(1));
+            // This major only, and nothing newer than what is running: a changelog written
+            // ahead of a release must not show up in the build before it.
+            keep = v.majorVersion() == running.majorVersion() && v <= running;
+            entry[QStringLiteral("version")] = m.captured(1);
+            entry[QStringLiteral("name")] = m.captured(2);
+            entry[QStringLiteral("date")] = m.captured(3);
+            entry[QStringLiteral("intro")] = QString();
+            continue;
+        }
+        if (entry.isEmpty() || line.isEmpty()
+                || line.startsWith(QLatin1String("---")) || line.startsWith(QLatin1String("==="))) {
+            continue;
+        }
+        const QString bullet = QStringLiteral("•");
+        if (line.endsWith(QLatin1Char(':')) && !line.startsWith(bullet)) {
+            flushSection();
+            section[QStringLiteral("title")] = line.left(line.size() - 1);
+            continue;
+        }
+        if (line.startsWith(bullet)) {
+            const QString body = line.mid(1).trimmed();
+            const int dash = body.indexOf(QStringLiteral(" — "));
+            QVariantMap item;
+            item[QStringLiteral("lead")] = dash > 0 ? body.left(dash) : QString();
+            item[QStringLiteral("text")] = dash > 0 ? body.mid(dash + 3) : body;
+            items.append(item);
+            continue;
+        }
+        if (section.isEmpty()) {
+            const QString intro = entry.value(QStringLiteral("intro")).toString();
+            entry[QStringLiteral("intro")] = intro.isEmpty() ? line : intro + QLatin1Char(' ') + line;
+        }
+    }
+    flushEntry();
+    return out;
 }

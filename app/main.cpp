@@ -1,4 +1,5 @@
 #include <QGuiApplication>
+#include <QScreen>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QIcon>
@@ -12,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QTemporaryFile>
 #include <QRegularExpression>
+#include <QTimer>
 #include <QWindow>
 
 #ifdef Q_OS_UNIX
@@ -46,6 +48,12 @@
 #include "cli/commandlineparser.h"
 #include "singleinstance.h"
 #include "path.h"
+#include "logfile.h"
+#include "backend/logsandcache.h"
+#include "backend/steamartwork.h"
+#include "backend/signinlaunch.h"
+#include "backend/tvlink.h"
+#include "backend/pyrowavetest.h"
 #include "storereset.h"
 #include "utils.h"
 #include "gui/computermodel.h"
@@ -60,6 +68,8 @@
 #include "settings/inputhints.h"
 #include "backend/powerstatus.h"
 #include "backend/windowmove.h"
+#include "backend/windowchrome.h"
+#include "backend/uisound.h"
 #include "backend/gradientimage.h"
 #include "gui/sdlgamepadkeynavigation.h"
 #include "XboxTileArtwork.h"
@@ -162,6 +172,57 @@ void logToLoggerStream(QString& message)
         // Log the message immediately
         LoggerTask(message).run();
     }
+}
+
+QString LogFile::currentPath()
+{
+#ifdef LOG_TO_FILE
+    QMutexLocker locker(&s_SyncLoggerMutex);
+    return s_LoggerFile != nullptr ? s_LoggerFile->fileName() : QString();
+#else
+    return QString();
+#endif
+}
+
+bool LogFile::continueIn(const QString& dir)
+{
+#ifdef LOG_TO_FILE
+    if (s_LoggerFile == nullptr) {
+        // stderr was redirected at launch: there is no file of ours to move
+        return false;
+    }
+
+    QString name = QString("StreamLight-%1.log").arg(QDateTime::currentSecsSinceEpoch());
+    for (int i = 1; QFile::exists(QDir(dir).filePath(name)); i++) {
+        name = QString("StreamLight-%1-%2.log").arg(QDateTime::currentSecsSinceEpoch()).arg(i);
+    }
+    auto* newFile = new QFile(QDir(dir).filePath(name));
+    if (!newFile->open(QIODevice::WriteOnly | QIODevice::Text)) {
+        delete newFile;
+        return false;
+    }
+
+    QString oldName;
+    {
+        // The stream is swapped under the lock every writer takes (LoggerTask), so no line is
+        // split between the two files and none is written to a closed one, async or not.
+        QMutexLocker locker(&s_SyncLoggerMutex);
+        oldName = s_LoggerFile->fileName();
+        s_LoggerStream << "The log continues in " << QDir::toNativeSeparators(newFile->fileName()) << "\n";
+        s_LoggerStream.flush();
+        s_LoggerStream.setDevice(newFile);
+        s_LoggerFile->close();
+        delete s_LoggerFile;
+        s_LoggerFile = newFile;
+        s_LogBytesWritten = 0;
+    }
+
+    qInfo() << "Log continued from" << QDir::toNativeSeparators(oldName);
+    return true;
+#else
+    Q_UNUSED(dir);
+    return false;
+#endif
 }
 
 void sdlLogToDiskHandler(void*, int category, SDL_LogPriority priority, const char* message)
@@ -429,6 +490,54 @@ void configureSignalHandlers()
 
 #endif
 
+/*
+ * ⚠️ 8.5.0: the window laid out again for the screen it is on now, when that screen has changed
+ * under it. At a sign-in on the SER9 (05/11/2026) the TV came up a second after the window was
+ * created on Windows' fallback display (640x480 at 100 %), as 1920x1080 at 200 % — and the
+ * window stayed sized for the old screen: twice the TV, only its top-left quarter on it. Its
+ * state (maximised, full screen) is applied again, so Windows and Qt size it afresh. Nothing is
+ * done when it already fits, and nothing while it is hidden (a stream).
+ */
+static void refitWindowToScreen(QWindow* win)
+{
+    if (win == nullptr || !win->isVisible()) {
+        return;
+    }
+    QScreen* screen = win->screen();
+    if (screen == nullptr) {
+        return;
+    }
+    const QWindow::Visibility state = win->visibility();
+    const QRect geometry = win->geometry();
+    const QRect target = state == QWindow::FullScreen ? screen->geometry() : screen->availableGeometry();
+    // A maximised frameless window hangs a few pixels off its work area (windowchrome.cpp).
+    const int slack = 24;
+    const bool fits = geometry.width() <= target.width() + slack && geometry.height() <= target.height() + slack
+                      && (state == QWindow::Windowed
+                          || (geometry.width() >= target.width() - slack && geometry.height() >= target.height() - slack));
+    qInfo() << "[screen] window on" << screen->name() << "at" << win->devicePixelRatio() << "x:" << geometry
+            << "for" << target << (fits ? "— fits" : "— laid out again");
+    if (fits) {
+        return;
+    }
+    if (state == QWindow::Maximized) {
+        win->showNormal();
+        QTimer::singleShot(0, win, [win]() { win->showMaximized(); });
+        // 8.6.1 (#52): the same pass through the normal state as after a stream; look after it.
+        WindowChrome::get()->settle(state, QStringLiteral("after a screen change"));
+    }
+    else if (state == QWindow::FullScreen) {
+        win->showNormal();
+        QTimer::singleShot(0, win, [win]() { win->showFullScreen(); });
+        WindowChrome::get()->settle(state, QStringLiteral("after a screen change"));
+    }
+    else if (state == QWindow::Windowed) {
+        QRect inside(target.topLeft(), geometry.size().boundedTo(target.size()));
+        inside.moveCenter(target.center());
+        win->setGeometry(inside);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     // Installer hook: the Inno Setup post-install [Run] step invokes
@@ -555,15 +664,6 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN32
     // Create a crash dump when we crash on Windows
     SetUnhandledExceptionFilter(UnhandledExceptionHandler);
-#endif
-
-#ifdef LOG_TO_FILE
-    // Prune the oldest existing logs if there are more than 10
-    QStringList existingLogNames = tempDir.entryList(QStringList("StreamLight-*.log"), QDir::NoFilter, QDir::SortFlag::Time);
-    for (int i = 10; i < existingLogNames.size(); i++) {
-        qInfo() << "Removing old log file:" << existingLogNames.at(i);
-        QFile(tempDir.filePath(existingLogNames.at(i))).remove();
-    }
 #endif
 
 #if defined(Q_OS_WIN32)
@@ -808,6 +908,27 @@ int main(int argc, char *argv[])
     // last one — and before the first, since now (§79.6).
     ClipboardSync::captureBaseline();
 
+    // 7.0.0: created here, before anything else installs an application event filter, so its
+    // keyboard filter runs AFTER SdlGamepadKeyNavigation's and InputHints' (the last one
+    // installed runs first) and never sounds a Steam echo they have already swallowed.
+    UiSound::get();
+
+    // 8.4.0: screens coming and going, for the log — a sign-in launch on the SER9 started on
+    // Windows' fallback display and froze when the TV's came up (SignInLaunch::waitForDisplay).
+    auto describeScreen = [](QScreen* screen) {
+        return QStringLiteral("%1 %2x%3 @ %4 Hz").arg(screen->name()).arg(screen->size().width())
+                .arg(screen->size().height()).arg(qRound(screen->refreshRate()));
+    };
+    QObject::connect(&app, &QGuiApplication::screenAdded, &app, [describeScreen](QScreen* screen) {
+        qInfo() << "[screen] added:" << describeScreen(screen);
+    });
+    QObject::connect(&app, &QGuiApplication::screenRemoved, &app, [describeScreen](QScreen* screen) {
+        qInfo() << "[screen] removed:" << describeScreen(screen);
+    });
+    QObject::connect(&app, &QGuiApplication::primaryScreenChanged, &app, [describeScreen](QScreen* screen) {
+        if (screen != nullptr) qInfo() << "[screen] primary:" << describeScreen(screen);
+    });
+
 #ifdef Q_OS_UNIX
     // Register signal handlers to arbitrate between SDL and Qt.
     // NB: This has to be done after the QGuiApplication is constructed to
@@ -865,6 +986,32 @@ int main(int argc, char *argv[])
         if (!singleInstance->attach()) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Another StreamLight instance is already running; raising it and exiting.");
+
+#ifdef LOG_TO_FILE
+            // This launch only raised the running instance, and its log is that one line. Kept,
+            // it would be the newest file in the folder — the one a user is told to attach —
+            // while the log that matters is the running instance's (issue #39 was answered
+            // with exactly this file). So it goes, after the same teardown as the end of
+            // main(): our handlers out, the queue drained, then the file closed and removed.
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+            SDL_SetLogOutputFunction(SDL_GetDefaultLogOutputFunction(), nullptr);
+#else
+            SDL_LogSetOutputFunction(oldSdlLogFn, oldSdlLogUserdata);
+#endif
+            qInstallMessageHandler(nullptr);
+#ifdef HAVE_FFMPEG
+            av_log_set_callback(av_log_default_callback);
+#endif
+            s_LoggerThread.waitForDone();
+            if (s_LoggerFile != nullptr) {
+                QMutexLocker locker(&s_SyncLoggerMutex);
+                s_LoggerStream.flush();
+                s_LoggerStream.setDevice(nullptr);
+                s_LoggerFile->remove();
+                delete s_LoggerFile;
+                s_LoggerFile = nullptr;
+            }
+#endif
             return 0;
         }
 
@@ -874,25 +1021,35 @@ int main(int argc, char *argv[])
         // Settings > Network. We launch unconditionally if not already running;
         // we never terminate it (the OFF toggle only affects the next launch).
         // Requires the official tailscale.com Windows installer.
+        //
+        // ⚠️ 8.4.0: started by the sign-in task (8.2.0), StreamLight runs ahead of Explorer, and a
+        // Tailscale launched here found no taskbar for its icon and quit with an error. Then it
+        // waits for the choice — SignInLaunch::release() starts it, and choosing the desktop
+        // never does — and autoStart() waits for the taskbar in every case.
         StreamingPreferences* bootPrefs = StreamingPreferences::get();
-        if (bootPrefs->tailscaleAutoStart) {
-            if (TailscaleManager::isAlreadyRunning()) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "TailscaleManager: already running, skipping auto-start");
-            }
-            else {
-                const QString tsPath = TailscaleManager::discoverExecutable();
-                if (tsPath.isEmpty()) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "TailscaleManager: executable not found, auto-start skipped "
-                                "(install Tailscale from https://tailscale.com/download)");
-                }
-                else {
-                    TailscaleManager::launch(tsPath);
-                }
-            }
+        if (bootPrefs->tailscaleAutoStart
+                && !app.arguments().contains(QString::fromLatin1(SignInLaunch::argument()))) {
+            TailscaleManager::autoStart();
         }
     }
+
+#ifdef LOG_TO_FILE
+    // Prune the oldest existing logs if there are more than 10. After the single-instance
+    // check, not before: a launch that only raises the running instance discards its own
+    // log above, and it must not cost an older one on the way out.
+    QStringList existingLogNames = tempDir.entryList(QStringList("StreamLight-*.log"), QDir::NoFilter, QDir::SortFlag::Time);
+    for (int i = 10; i < existingLogNames.size(); i++) {
+        qInfo() << "Removing old log file:" << existingLogNames.at(i);
+        QFile(tempDir.filePath(existingLogNames.at(i))).remove();
+    }
+#endif
+
+    // 8.5.0: the TV service's log, copied next to ours as StreamLightService.log. A few seconds
+    // in, so a launch at sign-in already finds the boot's lines (the TV turned on, Fast Startup).
+    QTimer::singleShot(3000, &app, [] { LogsAndCache::copyServiceLog(); });
+    // And on the way out: a launch at sign-in that picks the desktop closes in under a second,
+    // before the timer — on the SER9 (05/11/2026) the copy then stayed one boot behind.
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [] { LogsAndCache::copyServiceLog(); });
 
     SDL_version compileVersion;
     SDL_VERSION(&compileVersion);
@@ -1048,6 +1205,41 @@ int main(int argc, char *argv[])
                                          [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
                                              return WindowMove::get(qmlEngine);
                                          });
+    qmlRegisterSingletonType<WindowChrome>("WindowChrome", 1, 0,
+                                           "WindowChrome",
+                                           [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
+                                               return WindowChrome::get(qmlEngine);
+                                           });
+    qmlRegisterSingletonType<UiSound>("UiSound", 1, 0,
+                                      "UiSound",
+                                      [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
+                                          return UiSound::get(qmlEngine);
+                                      });
+    qmlRegisterSingletonType<LogsAndCache>("LogsAndCache", 1, 0,
+                                           "LogsAndCache",
+                                           [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
+                                               return LogsAndCache::get(qmlEngine);
+                                           });
+    qmlRegisterSingletonType<SteamArtwork>("SteamArtwork", 1, 0,
+                                           "SteamArtwork",
+                                           [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
+                                               return SteamArtwork::get(qmlEngine);
+                                           });
+    qmlRegisterSingletonType<SignInLaunch>("SignInLaunch", 1, 0,
+                                           "SignInLaunch",
+                                           [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
+                                               return SignInLaunch::get(qmlEngine);
+                                           });
+    qmlRegisterSingletonType<TvLink>("TvLink", 1, 0,
+                                     "TvLink",
+                                     [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
+                                         return TvLink::get(qmlEngine);
+                                     });
+    qmlRegisterSingletonType<PyroWaveTest>("PyroWaveTest", 1, 0,
+                                           "PyroWaveTest",
+                                           [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
+                                               return PyroWaveTest::get(qmlEngine);
+                                           });
 
     // Create the identity manager on the main thread
     IdentityManager::get();
@@ -1083,16 +1275,31 @@ int main(int argc, char *argv[])
     case GlobalCommandLineParser::NormalStartRequested:
         // Empty = normal launch (AppShell only). CLI modes set a .qml URL.
         initialView = QString();
+        // 8.2.0: started by the sign-in task — the opening animation stops on a choice, and no
+        // host is contacted until the user picks StreamLight (backend/signinlaunch.h).
+        SignInLaunch::setLaunchedAtSignIn(app.arguments().contains(QString::fromLatin1(SignInLaunch::argument())));
+        // 8.4.0: not on Windows' fallback display — the window would freeze when the TV comes up.
+        if (app.arguments().contains(QString::fromLatin1(SignInLaunch::argument())))
+            SignInLaunch::waitForDisplay();
         break;
     case GlobalCommandLineParser::StreamRequested:
         {
             initialView = "qrc:/gui/CliStartStreamSegue.qml";
             StreamingPreferences* preferences = StreamingPreferences::get();
             StreamCommandLineParser streamParser;
-            streamParser.parse(app.arguments(), preferences);
+            // Validated against a throwaway copy, never the global object. The options
+            // are applied for real by the launcher, on top of the host's active profile and the
+            // game's own settings, exactly as a launch from the GUI builds them — before, they
+            // went into the global object and the profile and per-game overrides were never read.
+            // It also keeps them out of anything that saves the global object mid-stream.
+            StreamingPreferences* validated = preferences->clone(nullptr);
+            streamParser.parse(app.arguments(), validated);
+            delete validated;
             QString host    = streamParser.getHost();
             QString appName = streamParser.getAppName();
-            auto launcher   = new CliStartStream::Launcher(host, appName, preferences, &app);
+            auto launcher   = new CliStartStream::Launcher(
+                host, appName, preferences,
+                [streamParser](StreamingPreferences* p) { streamParser.applyTo(p); }, &app);
             engine.rootContext()->setContextProperty("launcher", launcher);
             break;
         }
@@ -1133,6 +1340,23 @@ int main(int argc, char *argv[])
         engine.load(QUrl(QStringLiteral("qrc:/gui/main.qml")));
         if (engine.rootObjects().isEmpty())
             return -1;
+
+        // 8.5.0: a screen that comes, goes or replaces the window's — see refitWindowToScreen().
+        // Once things have settled: Windows moves the window and changes modes for a moment.
+        for (QObject* obj : engine.rootObjects()) {
+            QWindow* win = qobject_cast<QWindow*>(obj);
+            if (win == nullptr) {
+                continue;
+            }
+            auto* refit = new QTimer(win);
+            refit->setSingleShot(true);
+            refit->setInterval(700);
+            QObject::connect(refit, &QTimer::timeout, win, [win]() { refitWindowToScreen(win); });
+            QObject::connect(win, &QWindow::screenChanged, refit, [refit](QScreen*) { refit->start(); });
+            QObject::connect(&app, &QGuiApplication::screenAdded, refit, [refit](QScreen*) { refit->start(); });
+            QObject::connect(&app, &QGuiApplication::screenRemoved, refit, [refit](QScreen*) { refit->start(); });
+            QObject::connect(&app, &QGuiApplication::primaryScreenChanged, refit, [refit](QScreen*) { refit->start(); });
+        }
 
         // Bring our window to the foreground when a second instance asks.
         if (singleInstance != nullptr) {

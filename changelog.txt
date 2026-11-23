@@ -4,6 +4,474 @@ StreamLight - ChangeLog - Developed by FoggyBytes
 
 https://github.com/FoggyBytes/StreamLight
 
+---------------------------------------
+Version 8.8.4 - Straight Answer (22/11/2026)
+---------------------------------------
+
+No StreamTweak update required — 8.8.4 is client-side and works with any host. The Power chooser no longer promises to install updates on a shut down.
+
+🐛 FIXES:
+• Updates not installed on "Shut down" — with Windows updates waiting, the Power chooser offered "Install updates" under Shut down, but those updates were already installed and only a restart finishes them, so the PC shut down and the update stayed; the switch is gone, Restart reads "Update & restart" while updates are waiting, and a shut down says they stay pending — the same on the host's row
+
+---------------------------------------
+Version 8.8.3 - Full Name (14/11/2026)
+---------------------------------------
+
+No StreamTweak update required — 8.8.3 is client-side and works with any host. Profile names can be longer and are shown in full, and a host that refuses this device is no longer flooded with requests.
+
+✨ IMPROVEMENTS:
+• Longer profile names — a host profile's name can be 20 characters, up from 14
+
+🐛 FIXES:
+• Profile names cut in Home's profile list — the list (Start / W) had a fixed width, and next to a long line of settings, such as an ultrawide resolution, even a short name was cut; the list is now as wide as its longest row and the name is always shown in full
+• No more flood of requests to a host that refuses them — since 8.8.2, a host that approved this device but refused its signed commands was asked again in a loop, about 120 times a second; it is now asked at most twice a minute
+• "ERR_UNAUTHORIZED" as the Tailscale address — a refused request for the host's Tailscale address was saved as the address and shown on the host's card; only a real address is kept now, and a stored refusal is dropped at start
+• Two identical commands in the same millisecond — the host took the second for a replay and refused it; every command now carries its own time
+
+🙏 THANKS:
+• Thanks to @kayti for asking for it (https://github.com/FoggyBytes/StreamLight/issues/54)
+• Thanks to @joostleemereise-gif for the report and the logs (https://github.com/FoggyBytes/StreamTweak/issues/17)
+
+---------------------------------------
+Version 8.8.2 - Light Step (13/11/2026)
+---------------------------------------
+
+No StreamTweak update required — 8.8.2 is client-side and works with any host. The host card casts a shadow, and StreamLight does less work when nobody is looking.
+
+🎨 UI:
+• A shadow under the host card — the large card on Home now casts the same shadow as the game covers, in place of the thin line round it; with Reduce animations the shadow is off and the line is back
+
+✨ IMPROVEMENTS:
+• Quiet during a stream — Home asked every StreamTweak host for its link, its network state and its lock state every couple of seconds, and went on asking while a game was streaming or the window was minimized; those questions now stop until Home is back on screen
+• One question instead of two — on a host with StreamTweak 8.1.0 or later the link speed comes with the network state, so it is no longer asked separately
+• Lighter signing — every command to StreamTweak is signed, and each signature read the key from scratch; the key is now read once
+• Smoother timeline cursor — in the StreamTweak section's Sessions, moving the cursor along a session's timeline no longer redraws the whole chart at every step
+
+🐛 FIXES:
+• Even outline on the Accent colour button — one side of the colour square looked thicker than the other; the colour is now shown in a circle
+
+----------------------------------------
+Version 8.8.1 - Clean Lines (13/11/2026)
+----------------------------------------
+
+No StreamTweak update required — 8.8.1 is client-side and works with any host. A few visual fixes to the redone Host profiles and per-game settings.
+
+🐛 FIXES:
+• Double border in the profile list — with the cursor on the settings, + Add a profile, Sort and the profile in use showed two borders side by side; the list now draws one
+• Selected setting under the scroll bar — the highlighted row ran beneath the scroll bar on the right; the rows now stop before it
+• Footer hints in line — hints made only of text sat higher than the buttons beside them; they are now centred on the same line
+
+🎨 UI:
+• Fewer hints in the footer — ◀ Profiles, ◀ Game and ▶ Settings are gone: the D-pad moves between the two sides as everywhere else in the app
+
+-------------------------------------
+Version 8.8.0 - In Order (13/11/2026)
+-------------------------------------
+
+No StreamTweak update required — 8.8.0 is client-side and works with any host. Host profiles and per-game settings have a new look, made for the controller.
+
+✨ IMPROVEMENTS:
+• Host profiles, redone — the dialog fills the window: on the left a list of your profiles and Global, walked up and down with the D-pad; on the right every setting in one list divided into sections, with no tabs. A on a profile makes it the one the host streams with, ▶ and ◀ move between the two sides
+• One badge per setting — each row shows the value it streams with in a single badge; A opens it into every choice, ◀▶ choose, A confirms and B leaves it as it was. On Bitrate, A opens a slider
+• Global from the profiles — Global sits at the top of the list and its settings can be changed right there, the same ones as in Settings
+• Sort your profiles — Alphabetical, Created or Custom from the Sort button above the list; in Custom, R3 (M on the keyboard) picks a profile up, ▲▼ carry it, A puts it down and B puts it back, and the mouse drags it. The same order in the LT/RT cycle and in the profile list on Home
+• Per-game settings, same structure — the game on the left with Reset all and Reset stats, the same list on the right
+• Profile list on Home only — it opens with Start (W) or a click on the profile badge; holding LT or RT no longer opens it, so LT/RT step one profile at a time again
+
+🙏 THANKS:
+• Thanks to @kayti for asking for it (https://github.com/FoggyBytes/StreamLight/issues/53)
+
+---------------------------------------
+Version 8.7.1 - Quick Pick (12/11/2026)
+---------------------------------------
+
+No StreamTweak update required — 8.7.1 is client-side and works with any host. With many profiles, you can now pick the one you want from a list.
+
+✨ IMPROVEMENTS:
+• Profile list — hold LT or RT (Q or E) on Home or on a host's page and a list drops from the profile badge: Global and every profile, each with what it changes (resolution, frame rate, bitrate, HDR, codec); the D-pad moves, A picks, B closes without changing anything. A short press still steps one profile at a time. On Home, Start (W) and a click on the badge open it too; on a host's page, a click on the profile chip
+• A reminder when it helps — stepping quickly through three profiles or more shows "Hold LT or RT for the profile list" at the bottom of the screen, until you have opened the list by holding twice
+
+🙏 THANKS:
+• Thanks to @kayti for asking for it (https://github.com/FoggyBytes/StreamLight/issues/53)
+
+----------------------------------------
+Version 8.7.0 - Full Charge (11/11/2026)
+----------------------------------------
+
+No StreamTweak update required — 8.7.0 is client-side and works with any host. The top-right corner now shows how charged your controllers are.
+
+✨ NEW FEATURES:
+• Controller charge beside the clock — every controller connected without a cable whose charge can be read (Xbox on the Xbox Wireless Adapter or over Bluetooth, DualSense, DualShock 4, Switch Pro and Joy-Con, Valve's newer controllers) appears in the top-right corner with its maker's logo over a four-step gauge: full, medium, low, critical; amber when it is about to run out, red at 10 %, green with a bolt while it charges. Steps rather than a percentage, because a controller on the Xbox Wireless Adapter only reports four; a plain controller outline stands for makers without a logo here. StreamLight cannot read the charge of the original Steam Controller and of the Switch 2 controllers yet — the SDL library it uses does not provide it — so they do not appear
+
+🎨 UI:
+• Time, date and battery on three lines — the date now sits under the time and this device's battery under the date, one block centred on the controllers beside it; without a battery it is the time and the date
+
+-----------------------------------------
+Version 8.6.1 - Straight In (10/11/2026)
+-----------------------------------------
+
+No StreamTweak update required — 8.6.1 is client-side and works with any host. The window no longer comes back shifted after a stream in the Xbox full screen experience, and saying Yes to the update prompt with the controller now lands on Update now.
+
+🐛 FIXES:
+• Shifted window after a stream in the Xbox full screen experience — on a gaming handheld the window could come back from a stream with the page pushed up and a band at the bottom, until Win+F11 went to the desktop and back; after every stream StreamLight now checks for a few seconds that the window is back full screen, maximized or windowed as it was, and puts it back if not
+• The update prompt's Yes — with the controller, Settings → About opened with nothing focused, so Update now could not be reached until you left Settings with B and came back; the focus now goes to Update now as soon as the prompt is gone
+
+🙏 THANKS:
+• Thanks to @Guru11063 for the detailed report and to @av1155 for confirming it (https://github.com/FoggyBytes/StreamLight/issues/52)
+
+-----------------------------------------
+Version 8.6.0 - Hands Free (07/11/2026)
+-----------------------------------------
+
+No StreamTweak update required — 8.6.0 is client-side and works with any host. Updating from Settings no longer needs a mouse or a keyboard.
+
+✨ IMPROVEMENTS:
+• Update with the controller alone — Install now no longer opens the setup wizard behind a Windows permission prompt: a full-screen page in the app's own look follows the update from the check to the restart, and StreamLight reopens by itself and says "Updated to StreamLight 8.6.0"; the same with mouse and keyboard
+• No Windows prompt — the setup registers an update task for your account, and the new StreamLightUpdater checks the release against GitHub itself before it installs anything; on another account or a standard user the page says first that Windows will ask, and that a keyboard or mouse is needed to answer
+
+⚠️ COMPATIBILITY:
+• From the next update on — the update to 8.6.0 still opens the usual setup, since it is started by the version before it
+
+-----------------------------------------
+Version 8.5.1 - Same Again (06/11/2026)
+-----------------------------------------
+
+No StreamTweak update required — 8.5.1 is client-side and works with any host. The Power popup now remembers what you chose for each host.
+
+✨ IMPROVEMENTS:
+• The Power popup remembers — it opens on what you last confirmed for that host, for the host and for this device alike (Host: Sleep · This device: Keep on, say), instead of Keep on / Shut down every time; a mode the machine no longer offers falls back to Keep on, the Install updates boxes always start off, the focus stays on Cancel, and with no host (offline, or + Add) the popup still opens on Shut down for this device
+
+🙏 THANKS:
+• Thanks to @kayti for asking for it (https://github.com/FoggyBytes/StreamLight/issues/51)
+
+-----------------------------------------
+Version 8.5.0 - Clear Glass (06/11/2026)
+-----------------------------------------
+
+No StreamTweak update required — 8.5.0 works with any host; StreamTweak 10.1.1, out the same day, fixes its own setup and checks the Hue bridge's certificate before pairing. Every button in the app is now glass, like the host card's, and a security review of the TV service and of what the host sends closed the holes it found.
+
+🎨 UI:
+• Glass buttons everywhere — every button, selector and tile wears the host card's look: a faint wash under a thin border, and with the focus the same glass tinted by your accent under an accent border, instead of a solid accent fill with dark text; the host card's own buttons, dialogs, Settings, the profile dialogs, the host page, the on-screen keyboard, the PIN pad and the choice at sign-in included
+• The profile badge on the host card — the active profile's name stands on the same accent-tinted glass, in the card's own text colour
+
+🐛 FIXES:
+• Start at sign-in with a TV that comes on late — when the TV came up a moment after StreamLight had opened on Windows' fallback display, StreamLight stayed sized for that screen, twice too big, with only its top-left corner on the TV; it now waits for the TV's screen as Windows hands it over, and lays itself out again whenever the screen under it changes
+• The TV sooner after a shut down with Fast Startup — Windows' Fast Startup does not restart the TV service, so the TV came on only when Windows logged the boot, sometimes after the sign-in screen; the service now knows the boot as soon as Windows comes back and turns the TV on at once
+• Shut down like the Start menu — shutting this PC down from the Power popup was always a full shut down, so it started up more slowly than after a Shut down from Start; with Windows' Fast Startup on, it now uses it too ("Update and shut down" stays a full one, as in Start)
+• The TV service's log beside StreamLight's —the service keeps its log where StreamLight cannot write, so it was missing from the log folder; StreamLight now copies it there as StreamLightService.log at every launch and when the folder is opened from Settings → About
+• Navigation sounds on the PIN pad — after a wake, moving across the PIN pad with a controller made no sound, because its presses reached the pad without the check the rest of the app uses; they sound as everywhere else now, and pushing past the edge stays silent
+• The TV's key never travels in clear — when the TV's secure port did not answer, the TV service tried its old unencrypted one and sent the TV's key there; a TV paired over TLS is now reached over TLS only, and the certificate it showed is kept: a TV that later shows another one is sent nothing until it is paired again, and Settings → TV says so
+• The TV service's files are its own — the pairing file, with the TV's key, could be read by every user of the PC; the setup now gives the folder to the service and the administrators only, and the service's log a folder of its own that users can read
+• Settings → TV talks to StreamLight's service only — while the service was stopped, another program could have taken its name and answered in its place; StreamLight now checks who is at the other end, and connects in a way that never lets it act as you
+• Installed outside Program Files — in a folder elsewhere (D:\…), the setup gives StreamLight's folder the permissions of Program Files, so no other user can replace the files the TV service runs
+• TV search reads the TV only — any device answering the search could make the service fetch an address of its choosing, this PC included; the TV's name is now read only from the device that answered
+• Names from the host shown as text — a game, app or device name from the host that looked like markup could be read as such, and a picture in it fetched from anywhere; names are always shown as plain text now
+
+----------------------------------------
+Version 8.4.0 - Big Screen (03/11/2026)
+----------------------------------------
+
+The TV works with any host; the Hue Sync tab pairs with StreamTweak 10.1.0. An LG TV now comes on when the PC it is plugged into starts, from the Windows sign-in screen on, and goes off when it shuts down; and the host's Hue Sync no longer takes the lights from this device.
+
+✨ NEW FEATURES:
+• The TV follows this PC — Settings → TV pairs an LG webOS TV on the same network (one Allow with the TV's remote); the TV then comes on and switches to this PC's input when the PC starts, and goes off when it shuts down; a restart leaves it on, and so does sleep, because a wireless keyboard or mouse can wake a PC by itself a few seconds later and the TV would follow it
+• From boot — a small StreamLight service does it, so the TV comes on at the Windows sign-in screen too, with no need to remove your password; it runs with the fewest rights Windows gives a service and stops by itself when no TV is paired
+• Leaves the TV alone — a TV switched to another input or app is not turned off with the PC (Only when it shows this PC, on by default), and a soundbar on HDMI goes off with the TV, as with the TV's own remote
+• Hue Sync keeps the lights here — a Hue bridge syncs one area at a time, so the host's Hue Sync starting after a wake took the lights from this device's, which never got them back; with StreamTweak 10.1.0 the host can wait while the lights are in use (any device, or only this one), and this device can take them back, by hand or by itself
+• Search the host's library — a magnifier before ALL on the host page ([LB] from ALL, / or Ctrl+F on the keyboard, a click with the mouse), in both List and Grid layouts; results update as you type, case, accents and punctuation do not matter and "halflife" finds Half-Life; with a controller A opens the on-screen keyboard, B closes it, then the search, back to the tab you came from with the game found still selected
+
+🐛 FIXES:
+• Tailscale at sign-in — with Start at sign-in and Auto-start Tailscale both on, Tailscale could stop with "Unable to set up Tailscale client", because StreamLight started it before Windows had a taskbar for its icon; it now starts once you choose StreamLight, and only when the taskbar is there
+• Start at sign-in on a TV — when Windows was still on its fallback display at sign-in (the TV not yet up on the graphics card's output), StreamLight could open on an empty screen that never moved; it now waits for the real display, up to 20 s
+• Sleep from the Power popup on Modern Standby PCs — StreamLight could freeze for up to 30 s after the screen went off, because it waited for every open window to answer; it now turns the screen off without waiting
+• Sleep on Modern Standby PCs — the navigation sounds kept the audio output open, which Windows counts as audio playing, so the PC never reached its lowest-power idle while asleep; the output is now let go while the screen is off
+• The launch curtain waits for games only — with Wait for the game to appear on, opening the Desktop or another entry under APPS held the curtain up until See the host, waiting for a game window that never comes; moving an entry between GAMES and APPS moves this too
+
+🎨 UI:
+• Settings → TV — a new tab between Interface and Overlay: the TV with what it is showing, Turn on / Turn off, Change TV and Forget, then this PC's input (found when pairing), Turn the TV on (when the PC starts), Turn the TV off (when it shuts down) and Only when it shows this PC; LG webOS TVs only
+• Hue Sync in the StreamTweak section — a tab before Setup: the bridge's areas, the one syncing lit with who syncs it, what the host will do, Take back, and the rules; pairing the bridge takes its button; on a host without StreamTweak 10.1 the tab is greyed and Take back still works
+• Dashboard figures — GPU load, GPU temp, VRAM, CPU and RAM are big bold numbers in a lower row, without the minute-long charts
+• Mouse control in Stream Settings — a sixth tile, at the far right, turns controller mouse control (hold Start) on or off while streaming; it applies at once, without the reconnect, and Save keeps it in Settings → Input
+
+🙏 THANKS:
+• Thanks to @Noklef for the library search (https://github.com/FoggyBytes/StreamLight/pull/50)
+
+⚠️ COMPATIBILITY:
+• Launch Philips Hue Sync during streaming has been removed — StreamLight no longer starts Hue Sync when a stream begins or closes it when it ends, and the setting is gone from Settings, host profiles and per-game settings; start Hue Sync with Windows on this device instead, and use the new Hue Sync tab to keep the lights
+
+----------------------------------------
+Version 8.3.1 - Fair Count (30/10/2026)
+----------------------------------------
+
+No StreamTweak update required — 8.3.1 is client-side and works with any host.
+
+🐛 FIXES:
+• Frame rate in StreamTweak's session history — the frame rate StreamLight reports to the host every second came out about a third too low (a session at 90 fps was recorded as 62), because each one-second window was measured up to the moment it was sent rather than the moment it closed; sessions recorded before 8.3.1 keep the figure they have
+• Settings → Overlay — with the Bar layout, the preview now grows and shrinks with Small, Medium and Large, which it barely showed before; the bar in the stream was already right
+
+----------------------------------------
+Version 8.3.0 - At a Glance (30/10/2026)
+----------------------------------------
+
+No StreamTweak update required — 8.3.0 is client-side and works with any host. The in-stream overlays are redesigned: the performance overlay as a card or as a bar, the Stream Settings panel as a row of tiles, and what is going wrong in red. The window loses its title bar, and scroll bars and sliders take your accent.
+
+✨ NEW FEATURES:
+• Performance overlay as a bar — Settings → Overlay → Layout: Bar puts it on one line at the top centre (FPS · Bandwidth · Network · Decode · Frame loss), wrapping between figures on a narrow window; it keeps its own lines and its own Full, while Minimal (FPS · Network · Frame loss) and Default (the five above) are the same for the card and the bar
+• Problems in red — in the card and the bar, a figure of the Default view turns red when the problem is one you feel: frames lost on the network from 1%, network latency over 60 ms, decoding taking more than one frame; the thresholds are those of StreamTweak's session grade, and a figure you add beyond the Default is shown but never red and never turns the status dot red
+
+🎨 UI:
+• New in-stream overlays — the card, the bar, the Stream Settings panel and the notices are drawn with the app's own fonts and colours, follow your accent and keep their size relative to the screen, so Large is as readable at 4K as at 1080p
+• The card in sections — Stream, Network, This device and Host, a figure per row, in the top corner you choose
+• Stream Settings as tiles — the panel opens at the bottom centre, clear of the card and the bar; left and right pick a setting, up and down change it, a changed value carries a dot and the bitrate sits on a gauge; a setting that cannot change shows a padlock and why, as frame pacing does with VRR, and the button prompts are those of the controller in your hands
+• Text colour is gone from Settings → Overlay — the overlays follow the app's accent instead
+• No title bar — the app's background runs up to the top of the window, with only minimize, maximize and close at the top right, in the app's theme; dragging, double-click and Windows 11's snap layouts work as before
+• Scroll bars in your accent — a thin stroke that is always there while there is more to scroll and widens under the mouse, the same in Settings, on the host page and in the profile dialogs, and kept clear of the controls
+• New sliders — a filled track and a round handle in your accent that grows a little under the mouse or the controller, for the bitrate, the navigation sounds volume and the card opacity; in the profiles the bitrate stays neutral until the profile sets its own
+• Settings → Input says what the touchscreen does — with the trackpad off, touch and pen reach the host as they are
+• Start at sign-in — no button looks selected at first: A and B choose straight away, the D-pad shows the focus and moves it, and then A takes the focused button
+
+🐛 FIXES:
+• Host profiles — + Add no longer scrolls out of sight with many profiles: it stays beside the strip, always in reach of the mouse
+• The mouse wheel scrolls the strip of host profiles and the covers of the Library tab, which until now moved only with a drag
+• HDR streams — the in-stream overlays keep their colours and smooth text: they were drawn as for an SDR screen, so the Xbox Y turned orange and the text of the selected tile looked jagged
+• Settings → Overlay — with PyroWave the preview shows the figures it adds, such as Partial next to Frame loss, as the stream does
+
+🙏 THANKS:
+• Thanks to @caioavidal for the compact overlay (https://github.com/FoggyBytes/StreamLight/issues/47), to @kayti for reporting the hidden + Add (https://github.com/FoggyBytes/StreamLight/issues/49) and to @daniel7277 for the title bar (https://github.com/FoggyBytes/StreamLight/issues/48)
+
+---------------------------------------
+Version 8.2.0 - Front Door (28/10/2026)
+---------------------------------------
+
+StreamLight can open when you sign in to Windows and ask where you want to go. Deleting a session from the StreamTweak section needs StreamTweak 10.0.6 on the host; everything else works with any host.
+
+✨ NEW FEATURES:
+• Start at sign-in — with the new switch in Settings → Interface, StreamLight opens when you sign in to Windows and its opening animation stops on a choice: A starts StreamLight, B goes to the Windows desktop; left alone for 10 seconds it opens StreamLight, and any button or mouse movement stops the countdown. Nothing reaches your hosts until you pick StreamLight, so a host that wakes on any network packet stays asleep if you go to the desktop
+• Delete a session from the StreamTweak section — the right stick click (Del on the keyboard) in the Sessions tab deletes the selected session after a confirmation, from StreamTweak's history on the host as well; it needs Host management for this device and StreamTweak 10.0.6
+
+✨ IMPROVEMENTS:
+• The Sessions tab keeps up by itself — the session you just finished appears without leaving the tab and coming back, as soon as StreamTweak closes it (half a minute after the stream ends, the time it waits for a reconnect)
+
+🐛 FIXES:
+• No more "still running on the host" for a game that was closing — after Quit session a game that takes more than a few seconds to exit (Ace Combat 8 needs about 12) was reported as still running; StreamLight now asks again for half a minute and says so only if the game is really still there
+• The StreamTweak section no longer shows the game you just quit as streaming — for half a minute after a stream ended, the Dashboard said it was streaming to this device and then to "another device"; the card now appears only while another device is really streaming
+
+----------------------------------------
+Version 8.1.0 - Cover Story (28/10/2026)
+----------------------------------------
+
+No StreamTweak update required — 8.1.0 is client-side and works with any host. The host page can show its games as a wall of covers, and Wake can reach a second network card.
+
+✨ NEW FEATURES:
+• Grid of covers on the host page — the library can show its games as covers instead of the list: the left stick click, V or the prompt in the bottom bar switch between the two, and the selected game stays selected; in the grid the bar carries Play / Resume, Per-game settings and Stop, and the covers mark the game streaming now, the last one played and the pinned ones
+• A second MAC address for Wake — the new Wake-on-LAN tile in a host's Options takes the MAC of another network card of that PC, for a host whose streaming card is not the one that wakes it; Wake sends the magic packet to both
+
+🎨 UI:
+• Settings → Interface: Library layout (List, the default, or Grid), Grid cover size (Small, Medium, Large) and Grid titles
+• Left stick click glyphs for the Xbox, PlayStation, Nintendo and Steam sets
+
+🙏 THANKS:
+• Thanks to @Noklef for the grid of covers (https://github.com/FoggyBytes/StreamLight/pull/46) and to @kayti for asking for a second Wake address (https://github.com/FoggyBytes/StreamLight/issues/45)
+
+-----------------------------------------
+Version 8.0.1 - Full Picture (28/10/2026)
+-----------------------------------------
+
+Needs StreamTweak 10.0.4 on the host for the fuller timeline; with an older StreamTweak the two host tracks stay one line, as before. The overlay fixes work with any host.
+
+✨ IMPROVEMENTS:
+• Host compute and Host power show every reading — in a session's timeline, Host compute now draws GPU, encoder and CPU, and Host power the board power, the power limit in force, the GPU temperature and the moments at the limit, one strip each under the same clock and cursor with its value on the left; on PyroWave the encoder reads n/a, since PyroWave does not use it
+
+🐛 FIXES:
+• Host figures in the overlay no longer freeze — when the host stops answering (StreamTweak closed, or this device's access removed) its GPU, CPU and network figures go blank after 5 seconds instead of showing the last values as live ones
+• Bitrate in the overlay reads true — its average was 0 to 10% low
+
+------------------------------------
+Version 8.0.0 - At Hand (23/10/2026)
+------------------------------------
+
+Needs StreamTweak 10.0.0 on the host for the new StreamTweak section; everything else works with any host. The host's everyday controls move to the device you play from, and a controller can now type.
+
+✨ NEW FEATURES:
+• StreamTweak section — StreamTweak's logo on the host card, between Profiles and Options, opens the host's own pages: Dashboard, Sessions, Library, Apps and NVIDIA Sentinel, with LB/RB for the tabs as in Settings
+• Dashboard — the host at rest: GPU, GPU temperature, VRAM, CPU and RAM with the last minute charted, which device is streaming from it, link speed with Match and Restore, spatial audio on or off, and Windows Update
+• Sessions — the host's streaming history, every device's or only this one's: each session's verdict and the four checks behind it, its figures, and its timeline one track at a time, with a cursor on the right stick and zoom on LT/RT; mark two sessions with X and compare them with Start
+• Library — the games the streaming server lists, with their covers and a count per store, and Sync and restart: with Host management, X syncs the host's library and restarts the server so new games show up, step by step, in about a minute
+• Apps and NVIDIA Sentinel — turn the host's managed apps on or off, shown with their icons, and Sentinel's auto-restore; the GPU, the driver and the saved NVIDIA profile are listed. Changing anything needs Host management for this device on the host, otherwise the pages are read-only
+• On-screen keyboard — with a controller, the fields that need typing (profile name, host name and address, accent colour, custom frame rate and resolution) open a keyboard at the bottom of the screen: A types, X deletes, Y adds a space, LT is shift, RT symbols, Start is Done, B closes, the right stick moves it out of the way
+• As many host profiles as you like — the limit of three is gone; the profiles scroll sideways with LT/RT or Q/E, the D-pad or the right stick
+• Unlock frame rate — Settings → Interface: the interface's animations follow the display's refresh rate instead of 60 fps
+
+🎨 UI:
+• Settings → StreamTweak is now the Setup tab of the StreamTweak section; from Options, Request Access moved to Setup, Windows Update and Match / Restore link speed to the Dashboard
+• Without StreamTweak at work for a host, the section opens on Setup and its other tabs stay visible, greyed, with the reason on top and a button back to Setup
+• Settings and the StreamTweak section use a smaller text size, so more fits on screen
+• The suggested profile names line up in an even grid
+• Settings → About → Donate now opens the FoggyBytes page on Ko-fi
+
+🐛 FIXES:
+• Very wide, short screens such as 3840 × 1200 — the interface now scales by height too, and the host card no longer runs over itself
+• Status dots and the NEW badge over a host picture were too dark in the light theme
+
+🙏 THANKS:
+• Thanks to @kayti for asking for more streaming profiles (https://github.com/FoggyBytes/StreamLight/issues/42) and for reporting the glitches at 3840 × 1200 (https://github.com/FoggyBytes/StreamLight/issues/43)
+
+⚠️ COMPATIBILITY:
+• The StreamTweak section needs StreamTweak 10.0.0 on the host; with an older StreamTweak only its Setup tab works
+
+-----------------------------------------
+Version 7.0.3 - Soft Landing (17/10/2026)
+-----------------------------------------
+
+No StreamTweak update required — 7.0.3 is client-side and works with any host. Navigation sounds that are heard every time, with a mouse too, a volume, and a gentler sound for going back.
+
+✨ IMPROVEMENTS:
+• Navigation sounds for the mouse — a click on a button, a tile or a prompt plays Confirm, and Back on Cancel, Close and Back; never on hover
+• Navigation sounds volume — a slider beside the switch in Settings → Interface → Navigation sounds, from 0 to 100%, 100% by default
+
+🐛 FIXES:
+• Navigation sounds heard every time — the sound engine went to sleep after four quiet seconds, and on outputs that wake slowly, such as a TV over HDMI, the next sound was lost while it woke up: with the keyboard almost none was heard. It now stays ready while no stream is running and lets the device go for the stream
+
+🎨 UI:
+• A friendlier Back sound — backing out of a menu with B or Esc now plays a short rising note, softer than before, instead of a falling pair that sounded like a mistake
+
+🙏 THANKS:
+• Thanks to @markmghali (https://github.com/FoggyBytes/StreamLight/issues/40) for pointing out that the Back sound felt like an error
+
+------------------------------------------
+Version 7.0.2 - Trusted Parts (16/10/2026)
+------------------------------------------
+
+Works with any host; StreamTweak 9.2.3 adds the warning when a Quit leaves an Xbox app game open. A first step towards a signed StreamLight for Windows Smart App Control: the libraries StreamLight loads now carry their publishers' signatures, and the release is built on GitHub from the public source. The launch screen also learns how long each game takes to start.
+
+✨ IMPROVEMENTS:
+• Signed libraries — FFmpeg, SDL, OpenSSL, opus, dav1d, libplacebo and Discord RPC now ship as the copies signed in the official Moonlight 6.2.0 release, the same code as before; Qt's were already signed by The Qt Company
+• Built on GitHub — this release is built by GitHub Actions from the public repository, the first requirement for signing StreamLight itself
+• Name and version on every file — the installer and AntiHooking.dll now carry StreamLight's name and version, as StreamLight.exe does
+• The launch screen learns each game — "Taking longer than usual" now comes after the slowest of a game's last five launches on that host plus a quarter, so a title with a long start such as Gears of War: E-Day is no longer late every time it starts. Games never launched there keep the 20 seconds
+
+🐛 FIXES:
+• Quit session says when the game stays open — some games cannot be closed by the host, and StreamLight now says the game is still running instead of leaving it to be found there. Xbox app games are reported closed by the streaming server while they keep running: StreamTweak 9.2.3 sees them, and StreamLight asks it a few seconds after the Quit. Quitting from the host page no longer blames another device for a game it could not close
+
+🙏 THANKS:
+• Thanks to @IsaacGHall (https://github.com/FoggyBytes/StreamLight/issues/41) for reporting that Smart App Control blocks StreamLight
+
+---------------------------------------
+Version 7.0.1 - Clean Exit (16/10/2026)
+---------------------------------------
+
+No StreamTweak update required — 7.0.1 is client-side and works with any host. The installer now brings the Microsoft Visual C++ Runtime StreamLight needs and clears plugins left by older versions, Quit session now really ends the game, and launches from the command line follow your profiles.
+
+✨ NEW FEATURES:
+• Pause session — LB + RB + Y, or Ctrl+Alt+Shift+P, ends the stream and leaves the game running on the host, to resume it later. Rebindable in Settings → Shortcuts, listed under Quit session
+
+✨ IMPROVEMENTS:
+• Quit session closes the game — LB + RB + A and Ctrl+Alt+Shift+Q now end the stream and quit the game on the host, as their name says; until now they left it running, which is what Pause session does. Settings → Video → While streaming → Quit app when the stream window closes now covers only closing the stream window or cancelling a launch
+• Command-line launches follow your profiles — StreamLight.exe stream applies the host's active profile and the game's own settings, as a launch from the app does; options given on the command line still win
+• Command-line launches end the game with the stream — so nothing is left running on the host with no page to stop it from; --no-quit-after keeps it running
+• Command-line launch screen with the cover — the game's cover and its blurred background, as from the host page, and Resuming when the game was already running
+
+🐛 FIXES:
+• Microsoft Visual C++ Runtime installed when it is older — 7.0.0 needs a newer one than some PCs have, and without it StreamLight could close as soon as it opened. The installer now adds it only when the one on the PC is older, and asks to restart if Windows was using it
+• StreamLight opens again on PCs updated since 2024 — a network plugin left behind by an old version kept 7.0.0 from loading the one it uses, and it closed as soon as it opened. The installer now empties Qt's plugin folders before copying the new ones
+• PyroWave bitrate from the command line — --video-codec PyroWave, or a resolution or frame rate with PyroWave, now gets PyroWave's own default bitrate when the bitrate is automatic, instead of one sized for the other codecs
+• One log per launch — opening StreamLight while it is already running no longer leaves a one-line log as the newest file in the folder, nor deletes an older one
+
+🙏 THANKS:
+• Thanks to @ludipraxa (https://github.com/FoggyBytes/StreamLight/issues/39) for the command-line report and for spotting that the profile was ignored
+• Thanks to @markmghali (https://github.com/FoggyBytes/StreamLight/issues/40) for the logs and the folder listing that showed the leftover plugin
+
+---------------------------------------
+Version 7.0.0 - In a New Light (14/10/2026)
+---------------------------------------
+
+No StreamTweak update required — 7.0.0 is client-side and works with any host. A light theme, a palette of accent colours, a picture for each host's card, and an interface that moves.
+
+✨ NEW FEATURES:
+• Light theme — Settings → Interface → Theme: Dark, Light, System, which follows Windows, or Auto, which switches at sunrise and sunset where Windows locates the PC — or at two hours you set, also used when location is off. A soft grey rather than white, every text checked for contrast on every surface; the launch screen stays dark
+• Theme toggle on Home — the right stick click, or T on the keyboard, switches between Dark and Light; under System or Auto it holds the other theme until the next change
+• Accent colour palette — twenty-four colours in a popup that previews each one on the whole interface as the cursor moves: A keeps it, B puts back the one you had. The hex code field is still there
+• What's new in About — the changelog of this release, from 7.0.0 on, and a NEW mark beside each setting it added
+• Interface scale — Settings → Interface makes text and controls a step smaller or larger — 90%, 100% or 110% — on top of the automatic fit to the window
+• Scroll with the right stick — Settings, About, profiles and the host page scroll without moving the focus, so a controller can read what no control reaches; the next D-pad press brings the view back to the focus, and the status bar says Scroll whenever there is something to scroll
+• Navigation sounds — soft sounds when you move, confirm and go back with a controller or the keyboard, never with the mouse; pushing past the end of a list stays silent. Settings → Interface → Navigation sounds turns them off
+• PIN unlock whenever the host is locked — however the host was switched on, its card offers Unlock in place of Open and the PIN pad comes straight up; its page stays closed until it is signed in, and is left for Home if it locks while open. A game launched on a locked host brings up the pad first and starts by itself once Windows signs in. A host that is unlocked, or cannot say, behaves as before. Needs StreamTweak 8.1.0 or later on the host, like the unlock after a Wake
+• DualSense haptics — the fine vibration a game plays through the DualSense's actuators now reaches the controller on this device, over USB or Bluetooth. Needs Vibeshine or Vibepollo 2.0.1 or later on the host with its optional DualSense USB audio and haptics component; every other host keeps ordinary rumble. Built on Nonary's work for Moonlight and Sdore's SAxense
+• Steam artwork — StreamLight added to Steam as a non-Steam game gets its own cover, header, background and logo in the library and in Big Picture: Settings → Interface → Steam artwork applies them to every Steam account on the PC, and never replaces pictures you chose yourself. The same four images are installed in the Steam artwork folder, for assigning by hand
+• PyroWave Test — a new tile in the host's Options measures the wired network to the host and this device's decoder, then offers a bitrate for the target you choose: Minimum, Recommended, Moderate or Maximum. The host also learns how fast its frames can travel, and every later PyroWave stream to it uses that pace. Needs Vibeshine or Vibepollo 2.0.1 or later. Built on Nonary's calibration for Moonlight
+
+✨ IMPROVEMENTS:
+• Host background in a small popup — beside the card, which stays whole and is the preview: a picture or one of the last three, and the card's opacity. A picks a picture, B goes back and keeps it, X clears. Without a picture the card wears the accent colour, in a gradient checked for contrast
+• Badges and buttons that stand out — on the host page they have a neutral fill of their own, softened to half strength, instead of a faint wash of the colours behind them
+• The host card follows its picture — over a background picture its words, badges and buttons are drawn light, as in Dark, whichever theme is on
+• Each theme keeps its own — its accent colour and each host's background picture; the first time, Light starts from Dark's
+• Same buttons on Home and on the host page — LT/RT change the profile on both, and on Home LB/RB now move between hosts (PgUp/PgDn and Q/E on the keyboard, as before)
+• Settings → Session is now Interface — what happens around a stream (optimizing game settings, quitting the app on the host, keeping the display awake, Discord, Hue Sync) moved to Video → While streaming, and Wait for the game to appear to StreamTweak → Launch; host profiles and per-game settings follow the same tabs
+• Hold the D-pad to repeat — a held direction keeps moving, so sliders sweep and long lists run
+• The host page stands on the waves — the same moving background as Home, instead of the selected game's blurred cover; the launch screen keeps the cover, and Settings → Interface → Host page background brings the cover back to the host page for whoever prefers it
+• Last played stays when the game is gone — if the host no longer offers it, Home still shows it, with Play again greyed out
+• Settings and Options in a more natural order — Shortcuts beside Input, appearance first in Interface, the mouse before the keyboard, and Delete as the last tile in Options
+• All Apps out of Options — it opened the same page as Open on the host card; PyroWave Test takes its place
+• Recommended VRR frame rate in the list — with VRR on, the rate the display can hold (116 on a 120 Hz screen) joins the Frame rate choices as "116 VRR", and switching VRR on selects it; switching it off brings back the rate you had. In host profiles too
+• Qt 6.12 LTS — the interface runs on the newest long-term release of Qt, with a year and a half of its fixes since 6.8.3
+
+🎨 UI:
+• Motion throughout — the selection slides, buttons dip when pressed, popups spring in, pages zoom and slide into each other, tabs slide with LB/RB, lists fill in a cascade and give at their ends, and a wait that ends well draws its check, all of it quick. Settings → Reduce animations turns all of it off
+• A new launch screen — the page fades to black and the launch rises out of it: the host and the stream's settings along the top, the cover, the game and what is happening now at the lower left, and a bar along the foot that fills step by step — Connect and Launch, and Load when the launch waits for the game. Quitting wears the same look
+
+🐛 FIXES:
+• Readable selections with every accent — the text on a selected pill or a lit button is now dark or white by whichever reads better; with Rose, Ember or Magenta it was white at about 3:1
+• Cancelling and Applying new settings now show on the launch screen — the step under way always took their place
+• Small popups centred again — naming a profile or typing a custom resolution or frame rate from inside the profile dialogs opened the popup off to one side
+• StreamTweak found in green — Settings → StreamTweak drew "Found on this host" in the accent colour, which with a red accent read as a fault
+• Up on the D-pad in text fields — in Custom resolution, Custom frame rate, the profile name and Add a host, up on the pad moved forward instead of back
+• Enter signs in on the PIN pad — it typed the digit under the cursor instead
+• Same badges and buttons on Home and the host page — the host page's had a solid body of their own; both now wear the same light wash, in Dark and in Light, and so do the PIN pad's keys
+
+🙏 THANKS:
+• Thanks to @vitorhugoaranda (https://github.com/FoggyBytes/StreamLight/issues/33) for asking for a palette and a light theme
+• Thanks to @ykorsten (https://github.com/FoggyBytes/StreamLight/issues/35) for asking for the PIN pad on a host that is already awake
+• Thanks to @markmghali (https://github.com/FoggyBytes/StreamLight/issues/37) for asking for DualSense haptics and finding that Nonary's build already played them
+• Thanks to @Nik768 (https://github.com/FoggyBytes/StreamLight/issues/38) for asking for Steam library artwork and pointing to how Steam stores it
+
+---------------------------------------
+Version 6.5.1 - Full Steam (07/10/2026)
+---------------------------------------
+
+No StreamTweak update required — 6.5.1 is client-side and works with any host. Button icons for the Steam Controller and the Steam Deck, and a notice when Steam sends the controller as keyboard and mouse too.
+
+✨ IMPROVEMENTS:
+• Steam button icons — a fifth choice in Settings → Button icon set, with L1/R1, L2/R2, R3, View and Menu drawn the way Steam draws them. Auto picks it for the Steam Controller and the Steam Deck
+• A notice when Steam uses its Desktop layout — that layout sends the controller as keyboard and mouse too, so every press reaches StreamLight, and the game on the host, twice. StreamLight now spots it and says how to switch Steam to Gamepad: a long press of Menu on the Steam Controller, or launching StreamLight from Steam
+
+🙏 THANKS:
+• Thanks to @ludipraxa and @MariolloPL (https://github.com/FoggyBytes/StreamLight/issues/24) for testing 6.5.0 with the Steam Controller and for the log and screenshots
+
+---------------------------------------
+Version 6.5.0 - Clear View (06/10/2026)
+---------------------------------------
+
+No StreamTweak update required — 6.5.0 is client-side and works with any host. Logs, crash dumps and the cover cache in Settings, a security fix shared with Moonlight 6.2.0, PyroWave on Intel Arc graphics, one press on the controller moving the interface by one step again when Steam is running on this device, and the PyroWave frames that arrive incomplete shown in the overlay.
+
+✨ NEW FEATURES:
+• Logs, crash dumps and covers in Settings → About — see where StreamLight keeps them and how much space they take, open each folder, and clear them after a confirmation. Logs and crash dumps can move to Documents, StreamLight's app data or a folder you pick, and the move applies at once: the running log continues there
+
+✨ IMPROVEMENTS:
+• Updated libraries, the same as Moonlight 6.2.0 — OpenSSL 3.6.5, SDL 3.4.18, libopus 1.6.1 and a newer libplacebo
+• PyroWave frames with lost packets in the overlay — PyroWave shows a frame that lost packets, blurred where the data is missing, instead of dropping it, so "Frames dropped by your network connection" stayed at 0% while the picture flickered. A new line under it counts them, together with the frames too damaged to show at all, and the log records each reading
+• Decoding time shows the wait for the decoder — as in Nonary's build, the part of the decoding time a frame spends queued behind the decoder
+
+🐛 FIXES:
+• A malicious host can no longer crash StreamLight through an H.264 stream — CVE-2026-41210, fixed as in Moonlight 6.2.0: the SPS parser used a value from the stream as a table index without checking it
+• PyroWave works on Intel Arc graphics — drivers that share video memory only through NT handles (Core Ultra, N100) were refused, although the decoder needs nothing else; Nonary's fix
+• A controller press no longer moves the focus by two with Steam open — Steam's Desktop Layout sends the D-pad and A/B as keyboard keys too, so each press arrived both from the controller and from the keyboard. A key and the controller button it copies, a moment apart, now count once, including Esc in a dialog that would have closed the one underneath
+• The session summary in the log describes the whole session — it left out the last second of every figure, and its bitrate was the average of the last seconds before quitting; it is now the session average, and the host metrics are marked as the last sample
+
+🙏 THANKS:
+• Thanks to @MariolloPL and @ludipraxa (https://github.com/FoggyBytes/StreamLight/issues/24) for the report, the video and the logs
+• Thanks to @ludipraxa (https://github.com/FoggyBytes/StreamLight/issues/26) for the PyroWave tests and logs
+• Thanks to @yanfuh321-dot and @diegoalexandrooliveira (https://github.com/FoggyBytes/StreamLight/issues/34) for the Intel Arc report, and to @nerdytyphanie for the fix
+
 -----------------------------------------
 Version 6.4.1 - Steady Focus (02/10/2026)
 -----------------------------------------

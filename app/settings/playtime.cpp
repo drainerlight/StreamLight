@@ -3,6 +3,7 @@
 
 #include <QSettings>
 #include <QStringList>
+#include <QTimeZone>
 
 #define PLAYTIME_PREFIX "playtime/"
 
@@ -36,6 +37,14 @@
 
 // The host page's tab the user last chose (6.3.0).
 #define SER_LASTTAB     "lastTab"
+
+// The Power popup's last confirmed choice (8.5.1): the host's mode, then this device's.
+#define SER_POWERHOST   "powerHost"
+#define SER_POWERCLIENT "powerClient"
+
+// How long each game took to come on screen (7.0.2), in its own group per game ('l' prefix):
+// reset() clears a game's HOURS by removing its 'g' group, and a start-up time is not hours.
+#define SER_LAUNCHMS    "launchMs"
 
 PlaytimeManager* PlaytimeManager::get()
 {
@@ -197,7 +206,7 @@ PlaytimeRecord PlaytimeManager::recordFor(const QString& hostUuid, const QString
     const QString stamp = settings.value(QStringLiteral(SER_LASTPLAYED)).toString();
     if (!stamp.isEmpty()) {
         r.lastPlayed = QDateTime::fromString(stamp, Qt::ISODate);
-        r.lastPlayed.setTimeSpec(Qt::UTC);
+        r.lastPlayed.setTimeZone(QTimeZone::UTC);
     }
 
     r.lastFpsAvg          = settings.value(QStringLiteral(SER_FPS),         -1.0f).toFloat();
@@ -360,6 +369,68 @@ void PlaytimeManager::setLastTab(const QString& hostUuid, const QString& tab)
 
     QSettings settings;
     settings.setValue(hostGroup(hostUuid) + QStringLiteral("/" SER_LASTTAB), tab);
+}
+
+QStringList PlaytimeManager::powerChoiceOn(const QString& hostUuid) const
+{
+    if (hostUuid.isEmpty())
+        return { QString(), QString() };
+
+    QSettings settings;
+    const QString group = hostGroup(hostUuid);
+    return { settings.value(group + QStringLiteral("/" SER_POWERHOST)).toString(),
+             settings.value(group + QStringLiteral("/" SER_POWERCLIENT)).toString() };
+}
+
+void PlaytimeManager::setPowerChoice(const QString& hostUuid, const QString& hostMode,
+                                     const QString& clientMode)
+{
+    if (hostUuid.isEmpty() || hostMode.isEmpty() || clientMode.isEmpty())
+        return;
+
+    QSettings settings;
+    const QString group = hostGroup(hostUuid);
+    settings.setValue(group + QStringLiteral("/" SER_POWERHOST), hostMode);
+    settings.setValue(group + QStringLiteral("/" SER_POWERCLIENT), clientMode);
+}
+
+QString PlaytimeManager::launchGroup(const QString& hostUuid, const QString& appName)
+{
+    return hostGroup(hostUuid) + QStringLiteral("/l") + digest(normalise(appName));
+}
+
+void PlaytimeManager::recordLaunchTime(const QString& hostUuid, const QString& appName, qint64 ms)
+{
+    // Zero or less is a host that never said how long it took; past the host's own ceiling it
+    // is a launch that timed out rather than one that worked, and neither may set the bar.
+    if (hostUuid.isEmpty() || appName.isEmpty() || ms <= 0 || ms > kLaunchCeilingMs)
+        return;
+
+    QSettings settings;
+    const QString key = launchGroup(hostUuid, appName) + QStringLiteral("/" SER_LAUNCHMS);
+    QStringList times = settings.value(key).toStringList();
+    times.append(QString::number(ms));
+    while (times.size() > kLaunchesKept)
+        times.removeFirst();
+    settings.setValue(key, times);
+}
+
+qint64 PlaytimeManager::slowLaunchAfterMs(const QString& hostUuid, const QString& appName) const
+{
+    qint64 longest = 0;
+    if (!hostUuid.isEmpty() && !appName.isEmpty()) {
+        QSettings settings;
+        const QStringList times =
+                settings.value(launchGroup(hostUuid, appName) + QStringLiteral("/" SER_LAUNCHMS)).toStringList();
+        for (const QString& t : times)
+            longest = qMax(longest, t.toLongLong());
+    }
+
+    // The slowest of the recent launches that worked, plus a quarter: a game that always
+    // takes a minute and ten is not "taking longer than usual" at a minute and five. The
+    // longest rather than an average, because one warm-cache launch must not make the next
+    // cold one look like trouble. Never earlier than the bar every game had before 7.0.2.
+    return qMax(kDefaultSlowLaunchMs, longest + longest / 4);
 }
 
 void PlaytimeManager::forgetHost(const QString& hostUuid)

@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QSemaphore>
 #include <QQuickWindow>
+#include <QStringList>
 #include <QTimer>
 
 #include <Limelight.h>
@@ -21,7 +22,6 @@
 #include "../backend/launchgate.h"
 #include "launchcurtain.h"
 #include "../SessionTelemetrySampler.h"
-#include "../HueSyncManager.h"
 
 class SupportedVideoFormatList : public QList<int>
 {
@@ -126,6 +126,23 @@ class Session : public QObject
      */
     Q_PROPERTY(bool waitsForGame READ waitsForGame CONSTANT)
 
+    /**
+     * The badges along the top of the launch curtain (7.0.0): the host, then what this stream
+     * will be — resolution, frame rate, HDR, codec — in the Home card's wording. From the
+     * EFFECTIVE preferences, like waitsForGame, so a host profile or a per-game override is in
+     * them; the stream config itself is only filled in later, by initialize().
+     */
+    Q_PROPERTY(QString hostName READ hostName CONSTANT)
+    Q_PROPERTY(QStringList streamBadges READ streamBadges CONSTANT)
+
+    /**
+     * When the launch screen calls this game late, in ms from the moment the host starts
+     * opening it (7.0.2). Learnt per host and game from the launches that reached the game —
+     * see PlaytimeManager::slowLaunchAfterMs — so a title with a slow start is not "taking
+     * longer than usual" every time. 20 s for a game never launched here.
+     */
+    Q_PROPERTY(int slowLaunchAfterMs READ slowLaunchAfterMs CONSTANT)
+
     friend class SdlInputHandler;
     friend class DeferredSessionCleanupTask;
     friend class AsyncConnectionStartThread;
@@ -148,10 +165,23 @@ public:
         // on the host's screen, and the host's launch watcher is still reporting on the launch
         // that started it — a phase that has nothing to do with this connection, and that kept
         // the curtain up over a picture ready from the first frame.
-        return !m_UnlockMode && !m_RejoinsRunningApp
+        // 8.4.0: never for an entry under APPS (the Desktop above all) — see m_IsAppEntry.
+        return !m_UnlockMode && !m_RejoinsRunningApp && !m_IsAppEntry
             && m_StreamTweakEnabled && m_Preferences->waitForGameOnScreen
             && hostControlKind(m_App.id, m_App.uuid, m_App.name) == HostControl::None;
     }
+
+    QString hostName() const;
+    QStringList streamBadges() const;
+    int slowLaunchAfterMs() const;
+
+    // 7.0.2: the stream ended with Quit, the host accepted it, and the game is still running
+    // there (quitApp()'s 599). Read by the launch screen in sessionFinished(), after it is set.
+    Q_INVOKABLE bool hostAppStillRunning() const { return m_HostAppStillRunning; }
+    // 7.0.2: the stream ended by quitting the app on the host (Quit session, or the
+    // preference), not by pausing or a disconnect — the case worth asking GAMEALIVE about.
+    Q_INVOKABLE bool endedWithQuit() const { return m_EndedWithQuit; }
+    Q_INVOKABLE QString hostUuid() const { return m_Computer ? m_Computer->uuid : QString(); }
 
     explicit Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences = nullptr);
     virtual ~Session();
@@ -254,6 +284,13 @@ public:
     void flushWindowEvents();
 
     void setShouldExit(bool quitHostApp = false);
+
+    // The two ways out a user asks for from inside the stream (Quit session / Pause session
+    // shortcuts): end the stream, and close the app on the host — or leave it running to be
+    // resumed. Either answer overrides "Quit app on host after closing the stream", which is
+    // left to decide every other way a stream ends (closing the window, a signal, a CLI
+    // launch's default).
+    void requestEnd(bool quitHostApp);
 
     // True if the last connection terminated because no video traffic ever
     // arrived from the host (ML_ERROR_NO_VIDEO_TRAFFIC). This is usually a
@@ -579,6 +616,11 @@ private:
     QStringList m_LaunchWarnings;
     bool m_ShouldExit;
 
+    // What requestEnd() asked for: -1 = nothing (the preference decides), 0 = keep the host
+    // app running, 1 = quit it. Written on the main thread before the SDL_QUIT that ends the
+    // loop, read by the cleanup task that the loop's end starts.
+    int m_HostAppOnEnd = -1;
+
     bool m_AsyncConnectionSuccess;
     int m_PortTestResults;
 
@@ -603,9 +645,14 @@ private:
     bool                     m_EventLoopDone          = false;   // exec()'s loop has returned
     LinkMatcher*             m_LinkMatcher            = nullptr;
     LaunchGate*              m_LaunchGate             = nullptr;
+    // The host's elapsed_ms when it reported this game ready (7.0.2): what a launch that
+    // reached the game took, kept for PlaytimeManager::recordLaunchTime. 0 = never ready.
+    qint64                   m_GateReadyMs            = 0;
+    // Set by the cleanup task before it emits sessionFinished (see hostAppStillRunning()).
+    bool                     m_HostAppStillRunning    = false;
+    bool                     m_EndedWithQuit          = false;
     LaunchCurtain            m_Curtain;
     SessionTelemetrySampler* m_TelemetrySampler       = nullptr;
-    HueSyncManager*          m_HueSyncManager         = nullptr;
 
     // ── Play time (5.7.0) ────────────────────────────────────────────────────────────────
     /*
@@ -646,6 +693,11 @@ private:
     // and the launch that follows is a real one. The /resume-or-/launch choice on the wire,
     // in startConnectionAsync(), is untouched.
     bool m_RejoinsRunningApp = false;
+    // 8.4.0: the entry sits under APPS on the host page — the Desktop, Steam Big Picture, a
+    // tool — with the user's moves between GAMES and APPS honoured, as AppModel::isApp() does.
+    // The launch curtain waits for a GAME window; an app has none to wait for, and the wait
+    // only ran to its cap, or to "See the host" (Marcello, 03/11/2026). Fixed in the constructor.
+    bool m_IsAppEntry = false;
 
     // Remote PIN unlock. The buffer is fixed and small: a Windows Hello PIN is a handful of
     // digits, and a fixed array is something we can actually overwrite afterwards.

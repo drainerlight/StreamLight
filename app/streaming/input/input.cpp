@@ -1,6 +1,7 @@
 #include <Limelight.h>
 #include "SDL_compat.h"
 #include "streaming/session.h"
+#include "streaming/input/dualsensehaptics.h"
 #include "settings/mappingmanager.h"
 #include "settings/shortcutmanager.h"
 #include "streaming/video/streamsettingsoverlay.h"
@@ -81,6 +82,10 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     // want this behavior, they can override it with the environment variable.
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+    // SDL3's name for the same switch (7.0.0, with the waveform haptics, as in Nonary's tree).
+#ifdef SDL_HINT_JOYSTICK_ENHANCED_REPORTS
+    SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+#endif
 
     // Populate special key combo configuration from the user's saved shortcuts.
     // The KeyCombo enum order matches ShortcutManager::KbAction 1:1.
@@ -106,11 +111,12 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
 
     // User-configurable gamepad combos.
     m_PadQuitMask = ShortcutManager::loadPad(ShortcutManager::PAD_QUIT).buttonMask;
+    m_PadPauseMask = ShortcutManager::loadPad(ShortcutManager::PAD_PAUSE).buttonMask;
     m_PadStatsMask = ShortcutManager::loadPad(ShortcutManager::PAD_STATS).buttonMask;
     m_PadStreamSettingsMask = ShortcutManager::loadPad(ShortcutManager::PAD_STREAM_SETTINGS).buttonMask;
 
     // Live "Stream Settings" overlay (seeded from the session's preferences).
-    m_StreamSettings = new StreamSettingsOverlay(&prefs);
+    m_StreamSettings = new StreamSettingsOverlay(&prefs, this);
 
     m_OldIgnoreDevices = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES);
     m_OldIgnoreDevicesExcept = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT);
@@ -245,6 +251,19 @@ void SdlInputHandler::attachAlreadyConnectedGamepads()
     SDL_FlushEvent(SDL_CONTROLLERDEVICEADDED);
 }
 
+void SdlInputHandler::setGamepadMouse(bool on)
+{
+    m_GamepadMouse = on;
+    if (on) return;
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (m_GamepadState[i].mouseEmulationTimer != 0) {
+            SDL_RemoveTimer(m_GamepadState[i].mouseEmulationTimer);
+            m_GamepadState[i].mouseEmulationTimer = 0;
+            Session::get()->notifyMouseEmulationMode(false);
+        }
+    }
+}
+
 SdlInputHandler::~SdlInputHandler()
 {
     delete m_StreamSettings;
@@ -260,6 +279,8 @@ SdlInputHandler::~SdlInputHandler()
         }
 #endif
         if (m_GamepadState[i].controller != nullptr) {
+            // The waveform worker may still touch the controller: join it first.
+            if (m_GamepadState[i].hapticsAttached) DualSenseHaptics::detach(m_GamepadState[i].index);
             SDL_GameControllerClose(m_GamepadState[i].controller);
         }
     }

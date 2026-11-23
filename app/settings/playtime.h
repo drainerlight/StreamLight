@@ -175,6 +175,41 @@ public:
     QString lastTabOn(const QString& hostUuid) const;
     void setLastTab(const QString& hostUuid, const QString& tab);
 
+    // ── The Power popup's last choice (8.5.1, issue #51) ─────────────────────────────────
+    /*
+     * What the user last CONFIRMED in the Power popup opened on this host: one mode for the
+     * host and one for this device ("keep", "sleep", "restart", "shutdown"), so the popup
+     * reopens on it instead of "Keep on / Shut down" every time. A pair per host, because what
+     * this device does depends on the host: "host sleeps, this device stays on" is a choice
+     * made about THAT host, and the popup opened with no host (host offline, "+ Add") is there
+     * to switch this device off, so it never reads this. The update boxes are not kept: they
+     * depend on what is pending at that moment. In the host node, so forgetHost() takes it.
+     */
+    /// { host, client }; both empty when nothing was ever confirmed on this host.
+    QStringList powerChoiceOn(const QString& hostUuid) const;
+    void setPowerChoice(const QString& hostUuid, const QString& hostMode, const QString& clientMode);
+
+    // ── How long each game takes to come on screen (7.0.2) ───────────────────────────────
+    /*
+     * The launch screen says "Taking longer than usual" when the game is late. Until 7.0.2
+     * "late" was 20 s for every game, so a title with a slow start — Gears of War: E-Day's
+     * anti-cheat takes ~71 s — got the warning on every launch that was going fine.
+     *
+     * The time is the host's own (GAMESTATE's elapsed_ms when it reports the game ready), kept
+     * for the last kLaunchesKept launches that reached the game, per host uuid + NAME like
+     * everything else here. Its own group per game, not the hours group: reset() clears hours,
+     * not this. A Tailscale clone shares it; forgetHost() takes it along.
+     */
+    void recordLaunchTime(const QString& hostUuid, const QString& appName, qint64 ms);
+    /// When the launch screen should call this game late: the slowest recent launch plus a
+    /// quarter, never earlier than kDefaultSlowLaunchMs (which is also the answer with no history).
+    qint64 slowLaunchAfterMs(const QString& hostUuid, const QString& appName) const;
+
+    static constexpr int    kLaunchesKept        = 5;
+    static constexpr qint64 kDefaultSlowLaunchMs = 20000;
+    /// The host's own wait for a game (StreamTweak's LaunchWatcher). A launch past it timed out.
+    static constexpr qint64 kLaunchCeilingMs     = 90000;
+
     /**
      * Desktop and Steam Big Picture are not games and never accumulate hours.
      *
@@ -196,5 +231,6 @@ private:
     static QString normalise(const QString& appName);
     static QString digest(const QString& normalisedName);
     static QString gameGroup(const QString& hostUuid, const QString& appName);
+    static QString launchGroup(const QString& hostUuid, const QString& appName);
     static QString hostGroup(const QString& hostUuid);
 };
